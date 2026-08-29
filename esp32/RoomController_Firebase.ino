@@ -114,7 +114,10 @@ String firebaseUrl;  // e.g. https://your-project-default-rtdb.asia-southeast1.f
 String profileNum;
 
 // ── Room state ────────────────────────────────────────────────
-struct Slot { int sh, sm, eh, em; bool recurring; bool activated; bool expired; };
+// daysMask: 7-bit weekday set for recurring slots — bit 0=Sun .. bit 6=Sat.
+// 0 = no restriction (runs every day), which keeps pre-V1 recurring slots
+// (and all non-recurring slots) behaving exactly as before.
+struct Slot { int sh, sm, eh, em; bool recurring; bool activated; bool expired; int daysMask; };
 
 struct Room {
   bool lightOn   = false;
@@ -180,6 +183,15 @@ int nowSec()  { struct tm t; getLocalTime(&t); return t.tm_sec;  }
 // reboot is always correct regardless of how much time actually passed.
 int currentEpochDay() { return (int)(time(nullptr) / 86400L); }
 int nowMins() { return nowH() * 60 + nowMn(); }
+int nowWeekday() { struct tm t; getLocalTime(&t); return t.tm_wday; } // 0=Sun..6=Sat
+
+// True if a recurring slot runs on the current weekday. daysMask 0 = every
+// day (back-compat). Non-recurring slots aren't day-restricted, so callers
+// only apply this to recurring ones.
+bool slotRunsToday(const Slot &sl) {
+  if (sl.daysMask == 0) return true;
+  return (sl.daysMask & (1 << nowWeekday())) != 0;
+}
 
 String getTime() {
   struct tm t; getLocalTime(&t);
@@ -266,6 +278,10 @@ void mergeSlots(int idx) {
 bool isInSlot(int idx) {
   int nm = nowMins();
   for (int i = 0; i < rooms[idx].slotCount; i++) {
+    // A recurring slot that isn't scheduled for today's weekday is ignored —
+    // this is the day-of-week gate. Non-recurring slots (and recurring slots
+    // with daysMask 0) are unaffected.
+    if (rooms[idx].slots[i].recurring && !slotRunsToday(rooms[idx].slots[i])) continue;
     int s = rooms[idx].slots[i].sh * 60 + rooms[idx].slots[i].sm;
     int e = rooms[idx].slots[i].eh * 60 + rooms[idx].slots[i].em;
     if (nm >= s && nm < e) {
@@ -401,6 +417,7 @@ void parseSlots(int idx, String json) {
       bool isRecurring = false;
       bool isActivated = false;
       bool isExpired   = false;
+      int  slotDaysMask = 0; // 0 = every day (see Slot.daysMask)
       if (objStart >= 0 && objEnd >= 0) {
         String slotObj = json.substring(objStart, objEnd + 1);
         // Recurring flag
@@ -417,8 +434,22 @@ void parseSlots(int idx, String json) {
         // resets it to false and checkSchedules() re-marks it expired on the
         // next tick, spamming the log and re-writing Firebase every 10s.
         isExpired = slotObj.indexOf("\"expired\":true") >= 0;
+        // Recurring weekday set — the PWA writes "days":[0..6] (0=Sun). Parse
+        // the digits between [ and ] into a 7-bit mask. Absent/null/empty →
+        // mask 0 = "every day" (back-compat for pre-V1 recurring slots).
+        int daysKey = slotObj.indexOf("\"days\":[");
+        if (daysKey >= 0) {
+          int p = daysKey + 8; // just past "days":[
+          while (p < (int)slotObj.length() && slotObj[p] != ']') {
+            if (isDigit(slotObj[p])) {
+              int d = slotObj[p] - '0';         // single-digit 0..6
+              if (d >= 0 && d <= 6) slotDaysMask |= (1 << d);
+            }
+            p++;
+          }
+        }
       }
-      tempSlots[tempCount++] = {sh, sm, eh, em, isRecurring, isActivated, isExpired};
+      tempSlots[tempCount++] = {sh, sm, eh, em, isRecurring, isActivated, isExpired, slotDaysMask};
     }
     pos = max(si, ei) + 10;
   }
@@ -706,11 +737,28 @@ bool midnightRollover() {
         String ph = extractStringField(existingSlot, "phone");
         if (ph.length() > 0) phoneField = ",\"phone\":\"" + ph + "\"";
       }
+      // Preserve the recurring weekday set across the rollover — rebuild the
+      // "days":[..] array from this slot's daysMask. Without this the mask is
+      // lost the first midnight and the slot silently reverts to every-day.
+      // Omitted when mask is 0 (every day), matching how the PWA writes it.
+      String daysField = "";
+      if (rooms[i].slots[j].daysMask != 0) {
+        daysField = ",\"days\":[";
+        bool dfirst = true;
+        for (int dd = 0; dd < 7; dd++) {
+          if (rooms[i].slots[j].daysMask & (1 << dd)) {
+            if (!dfirst) daysField += ",";
+            daysField += String(dd);
+            dfirst = false;
+          }
+        }
+        daysField += "]";
+      }
       // Reset activatedAt for new day — user must re-activate. date is
       // stamped to today — a recurring slot's date is otherwise whatever
       // it was on first creation, meaningless for a slot that repeats daily.
       newTodayJson += "{\"s\":\"" + String(s) + "\",\"e\":\"" + String(e) + "\",\"recurring\":true" +
-        codeField + bookedByField + phoneField + ",\"date\":\"" + getDateStr() + "\",\"activatedAt\":null}";
+        codeField + bookedByField + phoneField + daysField + ",\"date\":\"" + getDateStr() + "\",\"activatedAt\":null}";
       first = false;
     }
 
@@ -903,6 +951,9 @@ bool inWarningWindow(int idx) {
   int nm = nowMins();
   for (int j = 0; j < rooms[idx].slotCount; j++) {
     if (!rooms[idx].slots[j].activated) continue;
+    // Don't warn for a recurring slot that isn't scheduled today — same
+    // day-of-week gate isInSlot() applies.
+    if (rooms[idx].slots[j].recurring && !slotRunsToday(rooms[idx].slots[j])) continue;
     int e = rooms[idx].slots[j].eh * 60 + rooms[idx].slots[j].em;
     if (nm >= e - warnMinutes && nm < e) return true;
   }

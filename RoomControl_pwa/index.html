@@ -2537,6 +2537,10 @@ async function pushRoom(idx, profile) {
       // field for a slot with no booker rather than leaving a stale value.
       bookedBy: sl.bookedBy || null,
       phone: sl.phone || null,
+      // Per-slot recurring weekday set (0=Sun..6=Sat) — written so the day-of-
+      // week recurrence persists and reaches the ESP32. null for non-recurring
+      // slots or recurring slots with no restriction (runs every day).
+      days: (sl.recurring && Array.isArray(sl.days) && sl.days.length) ? sl.days : null,
       // expired IS explicitly reset here (unlike activatedAt/attempts/
       // lockedUntil, which stay ESP32/activate.html-owned) — PATCH only
       // touches fields it's given, so without this a slot that reuses a
@@ -2621,12 +2625,27 @@ async function pushRoom(idx, profile) {
 // outage, a stale lastRolloverEpochDay marker surviving a firmware
 // update, etc.) and stale one-time slots need clearing before the next
 // real midnight — runs entirely from here, no ESP32 involvement needed.
+// True if a recurring slot should run on the given weekday (0=Sun..6=Sat).
+// A slot with no days list (or an empty one) runs EVERY day — preserves the
+// pre-V1 "recurring = daily" behavior for slots created before this feature.
+// Recurring slots are NEVER dropped from the bucket on off days (that would
+// lose them permanently); instead this gate is consulted wherever we decide
+// whether the slot is "live today" — schedule/relay evaluation and display.
+function recurringRunsOnDay(sl, weekday) {
+  if (!Array.isArray(sl.days) || sl.days.length === 0) return true;
+  return sl.days.includes(weekday);
+}
+function recurringRunsToday(sl) { return recurringRunsOnDay(sl, new Date().getDay()); }
+
 function rolloverRoomLocally(r) {
   const todaySlots    = normalizeSlots(r.slots[0]);
   const tomorrowSlots  = normalizeSlots(r.slots[1]);
   const resetFields = { activatedAt: null, activatedBy: null, attempts: 0, lockedUntil: null, expired: false, _fresh: true };
   const todayDateStr = todayStr();
 
+  // Recurring slots always survive rollover (kept in the bucket every day so
+  // they're never lost); whether they actually run on a given day is decided
+  // at evaluation time by recurringRunsToday(), not by dropping them here.
   const keptRecurring = todaySlots.filter(sl => sl.recurring).map(sl => ({ ...sl, ...resetFields }));
   // A one-time slot in today's bucket whose own date is still actually
   // today was created after an earlier rollover ran today (or just now)
@@ -2728,7 +2747,11 @@ function nowMins()  { const n=new Date(); return n.getHours()*60+n.getMinutes();
 
 function isScheduledNow(room) {
   const nm = nowMins();
-  return (room.slots[0]||[]).some(s => nm >= toMins(s.s) && nm < toMins(s.e));
+  // A recurring slot only counts today if today's weekday is in its days list
+  // (recurringRunsToday); one-time slots and legacy recurring slots (no days)
+  // count as before.
+  return (room.slots[0]||[]).some(s =>
+    nm >= toMins(s.s) && nm < toMins(s.e) && (!s.recurring || recurringRunsToday(s)));
 }
 
 function getLightState(room) {
@@ -2838,6 +2861,10 @@ async function applyRecurring(id) {
         r.slots[day].push({
           s: r.recurring.start, e: r.recurring.end,
           recurring: true, code: generate4DigitCode(),
+          // Per-slot weekday set (0=Sun..6=Sat) — this is what makes the
+          // recurrence day-specific: rollover (PWA + ESP32) keeps/re-adds this
+          // slot only on days in this list. Empty/absent = every day (back-compat).
+          days: [...r.recurring.days],
           activatedAt: null, activatedBy: null,
           attempts: 0, lockedUntil: null, expired: false,
           _fresh: true,

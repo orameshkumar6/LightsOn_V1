@@ -293,6 +293,10 @@ async function loadSlots() {
       slots.forEach((sl, originalIndex) => {
         if (sl.date === tomorrowStr()) return; // skip tomorrow
         if (toMins(sl.e) <= nm) return;        // skip ended
+        // Day-of-week recurrence: a recurring slot with a days list only shows
+        // on its configured weekdays. No days list (or non-recurring) = every day.
+        if (sl.recurring && Array.isArray(sl.days) && sl.days.length &&
+            !sl.days.includes(new Date().getDay())) return;
 
         const mergedSlot = { ...sl, origIdx: originalIndex, roomKey: key };
 
