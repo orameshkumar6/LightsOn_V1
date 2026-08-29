@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>Wiring Diagram</title>
+<style>
+  body { background:#1a1a2e; font-family: monospace; display:flex; justify-content:center; padding:20px; }
+  svg text { font-family: -apple-system, sans-serif; }
+</style>
+</head>
+<body>
+<div style="max-width:700px;margin:0 auto 12px;padding:12px 16px;background:#22223b;border:1px solid #f0a030;border-radius:8px;color:#f0f0f5;font-family:-apple-system,sans-serif;font-size:13px">
+  ⚠️ Since v3.0, GPIO pin numbers are chosen per-room in the PWA's Settings page,
+  not fixed in code. The pin labels below (G26, G27, etc.) are just the original
+  example wiring — use whichever GPIO numbers you actually entered for each room
+  in Settings → Room names &amp; GPIO pins. Everything else on this diagram (the
+  VCC/GND/IN layout, COM/NO/NC load wiring) is still accurate regardless of which
+  exact pins you chose.
+</div>
+<svg viewBox="0 0 700 520" width="700" xmlns="http://www.w3.org/2000/svg">
+  <!-- Background -->
+  <rect width="700" height="520" fill="#0f0f1a"/>
+  <text x="350" y="30" fill="#f0f0f5" font-size="16" font-weight="bold" text-anchor="middle">ESP32 → 6-Channel Relay Wiring (example pins)</text>
+
+  <!-- ESP32 board -->
+  <rect x="60" y="60" width="140" height="380" rx="8" fill="#22223b" stroke="#4a8fff" stroke-width="1.5"/>
+  <text x="130" y="82" fill="#4a8fff" font-size="12" font-weight="bold" text-anchor="middle">ESP32</text>
+
+  <!-- ESP32 pins -->
+  <!-- Power pins -->
+  <rect x="170" y="95" width="30" height="18" rx="3" fill="#1a1a2e" stroke="#888"/>
+  <text x="185" y="108" fill="#40c080" font-size="10" text-anchor="middle">VIN</text>
+  <rect x="170" y="118" width="30" height="18" rx="3" fill="#1a1a2e" stroke="#888"/>
+  <text x="185" y="131" fill="#888" font-size="10" text-anchor="middle">GND</text>
+
+  <!-- GPIO pins -->
+  <rect x="170" y="155" width="30" height="18" rx="3" fill="#1a1a2e" stroke="#4a8fff"/>
+  <text x="185" y="168" fill="#4a8fff" font-size="10" text-anchor="middle">G26</text>
+  <rect x="170" y="200" width="30" height="18" rx="3" fill="#1a1a2e" stroke="#4a8fff"/>
+  <text x="185" y="213" fill="#4a8fff" font-size="10" text-anchor="middle">G27</text>
+  <rect x="170" y="245" width="30" height="18" rx="3" fill="#1a1a2e" stroke="#4a8fff"/>
+  <text x="185" y="258" fill="#4a8fff" font-size="10" text-anchor="middle">G14</text>
+  <rect x="170" y="290" width="30" height="18" rx="3" fill="#1a1a2e" stroke="#4a8fff"/>
+  <text x="185" y="303" fill="#4a8fff" font-size="10" text-anchor="middle">G12</text>
+  <rect x="170" y="335" width="30" height="18" rx="3" fill="#1a1a2e" stroke="#4a8fff"/>
+  <text x="185" y="348" fill="#4a8fff" font-size="10" text-anchor="middle">G13</text>
+  <rect x="170" y="380" width="30" height="18" rx="3" fill="#1a1a2e" stroke="#4a8fff"/>
+  <text x="185" y="393" fill="#4a8fff" font-size="10" text-anchor="middle">G15</text>
+
+  <!-- ESP32 labels -->
+  <text x="130" y="108" fill="#40c080" font-size="10" text-anchor="middle">5V Power</text>
+  <text x="130" y="131" fill="#888" font-size="10" text-anchor="middle">Ground</text>
+  <text x="130" y="168" fill="#4a8fff" font-size="10" text-anchor="middle">Room 1</text>
+  <text x="130" y="213" fill="#4a8fff" font-size="10" text-anchor="middle">Room 2</text>
+  <text x="130" y="258" fill="#4a8fff" font-size="10" text-anchor="middle">Room 3</text>
+  <text x="130" y="303" fill="#4a8fff" font-size="10" text-anchor="middle">Room 4</text>
+  <text x="130" y="348" fill="#4a8fff" font-size="10" text-anchor="middle">Room 5</text>
+  <text x="130" y="393" fill="#4a8fff" font-size="10" text-anchor="middle">Room 6</text>
+
+  <!-- Relay module -->
+  <rect x="380" y="60" width="160" height="380" rx="8" fill="#22223b" stroke="#f0a030" stroke-width="1.5"/>
+  <text x="460" y="82" fill="#f0a030" font-size="12" font-weight="bold" text-anchor="middle">6CH Relay</text>
+
+  <!-- Relay input pins -->
+  <rect x="350" y="95" width="30" height="18" rx="3" fill="#1a1a2e" stroke="#40c080"/>
+  <text x="365" y="108" fill="#40c080" font-size="10" text-anchor="middle">VCC</text>
+  <rect x="350" y="118" width="30" height="18" rx="3" fill="#1a1a2e" stroke="#888"/>
+  <text x="365" y="131" fill="#888" font-size="10" text-anchor="middle">GND</text>
+  <rect x="350" y="155" width="30" height="18" rx="3" fill="#1a1a2e" stroke="#f0a030"/>
+  <text x="365" y="168" fill="#f0a030" font-size="10" text-anchor="middle">IN1</text>
+  <rect x="350" y="200" width="30" height="18" rx="3" fill="#1a1a2e" stroke="#f0a030"/>
+  <text x="365" y="213" fill="#f0a030" font-size="10" text-anchor="middle">IN2</text>
+  <rect x="350" y="245" width="30" height="18" rx="3" fill="#1a1a2e" stroke="#f0a030"/>
+  <text x="365" y="258" fill="#f0a030" font-size="10" text-anchor="middle">IN3</text>
+  <rect x="350" y="290" width="30" height="18" rx="3" fill="#1a1a2e" stroke="#f0a030"/>
+  <text x="365" y="303" fill="#f0a030" font-size="10" text-anchor="middle">IN4</text>
+  <rect x="350" y="335" width="30" height="18" rx="3" fill="#1a1a2e" stroke="#f0a030"/>
+  <text x="365" y="348" fill="#f0a030" font-size="10" text-anchor="middle">IN5</text>
+  <rect x="350" y="380" width="30" height="18" rx="3" fill="#1a1a2e" stroke="#f0a030"/>
+  <text x="365" y="393" fill="#f0a030" font-size="10" text-anchor="middle">IN6</text>
+
+  <!-- Relay output side -->
+  <text x="460" y="130" fill="#888" font-size="11" text-anchor="middle">COM / NO / NC</text>
+  <text x="460" y="148" fill="#888" font-size="10" text-anchor="middle">per relay channel</text>
+  <rect x="410" y="155" width="100" height="18" rx="3" fill="#1a1a2e" stroke="#888" stroke-dasharray="4"/>
+  <text x="460" y="168" fill="#e05050" font-size="10" text-anchor="middle">COM  NO  NC</text>
+  <rect x="410" y="200" width="100" height="18" rx="3" fill="#1a1a2e" stroke="#888" stroke-dasharray="4"/>
+  <text x="460" y="213" fill="#e05050" font-size="10" text-anchor="middle">COM  NO  NC</text>
+  <rect x="410" y="245" width="100" height="18" rx="3" fill="#1a1a2e" stroke="#888" stroke-dasharray="4"/>
+  <text x="460" y="258" fill="#e05050" font-size="10" text-anchor="middle">COM  NO  NC</text>
+  <rect x="410" y="290" width="100" height="18" rx="3" fill="#1a1a2e" stroke="#888" stroke-dasharray="4"/>
+  <text x="460" y="303" fill="#e05050" font-size="10" text-anchor="middle">COM  NO  NC</text>
+  <rect x="410" y="335" width="100" height="18" rx="3" fill="#1a1a2e" stroke="#888" stroke-dasharray="4"/>
+  <text x="460" y="348" fill="#e05050" font-size="10" text-anchor="middle">COM  NO  NC</text>
+  <rect x="410" y="380" width="100" height="18" rx="3" fill="#1a1a2e" stroke="#888" stroke-dasharray="4"/>
+  <text x="460" y="393" fill="#e05050" font-size="10" text-anchor="middle">COM  NO  NC</text>
+
+  <!-- Connection wires -->
+  <!-- Power wires -->
+  <polyline points="200,104 240,104 240,104 350,104" fill="none" stroke="#40c080" stroke-width="2"/>
+  <polyline points="200,127 240,127 240,127 350,127" fill="none" stroke="#555" stroke-width="2"/>
+
+  <!-- Signal wires - colors per room -->
+  <polyline points="200,164 275,164 275,164 350,164" fill="none" stroke="#4a8fff" stroke-width="1.5"/>
+  <polyline points="200,209 275,209 275,209 350,209" fill="none" stroke="#4a8fff" stroke-width="1.5"/>
+  <polyline points="200,254 275,254 275,254 350,254" fill="none" stroke="#4a8fff" stroke-width="1.5"/>
+  <polyline points="200,299 275,299 275,299 350,299" fill="none" stroke="#4a8fff" stroke-width="1.5"/>
+  <polyline points="200,344 275,344 275,344 350,344" fill="none" stroke="#4a8fff" stroke-width="1.5"/>
+  <polyline points="200,389 275,389 275,389 350,389" fill="none" stroke="#4a8fff" stroke-width="1.5"/>
+
+  <!-- Load wiring note -->
+  <rect x="560" y="140" width="120" height="180" rx="8" fill="#22223b" stroke="#e05050" stroke-width="1"/>
+  <text x="620" y="160" fill="#e05050" font-size="11" font-weight="bold" text-anchor="middle">Load side</text>
+  <text x="620" y="178" fill="#888" font-size="9" text-anchor="middle">(per relay)</text>
+  <line x1="510" y1="164" x2="560" y2="200" stroke="#e05050" stroke-width="1" stroke-dasharray="3"/>
+  <text x="620" y="205" fill="#40c080" font-size="10" text-anchor="middle">Power + → COM</text>
+  <text x="620" y="225" fill="#f0a030" font-size="10" text-anchor="middle">Load + → NO</text>
+  <text x="620" y="245" fill="#888" font-size="10" text-anchor="middle">Load - → PSU -</text>
+  <line x1="620" y1="255" x2="620" y2="270" stroke="#888" stroke-width="1"/>
+  <text x="620" y="285" fill="#e05050" font-size="9" text-anchor="middle">⚠️ For mains</text>
+  <text x="620" y="300" fill="#e05050" font-size="9" text-anchor="middle">voltage use an</text>
+  <text x="620" y="315" fill="#e05050" font-size="9" text-anchor="middle">electrician!</text>
+
+  <!-- Legend -->
+  <rect x="60" y="470" width="580" height="36" rx="6" fill="#22223b"/>
+  <line x1="80" y1="488" x2="110" y2="488" stroke="#40c080" stroke-width="2"/>
+  <text x="115" y="492" fill="#888" font-size="11">Power (5V)</text>
+  <line x1="200" y1="488" x2="230" y2="488" stroke="#555" stroke-width="2"/>
+  <text x="235" y="492" fill="#888" font-size="11">Ground</text>
+  <line x1="300" y1="488" x2="330" y2="488" stroke="#4a8fff" stroke-width="2"/>
+  <text x="335" y="492" fill="#888" font-size="11">Signal (GPIO)</text>
+  <line x1="440" y1="488" x2="470" y2="488" stroke="#e05050" stroke-width="2" stroke-dasharray="4"/>
+  <text x="475" y="492" fill="#888" font-size="11">Load (your lights)</text>
+</svg>
+</body>
+</html>

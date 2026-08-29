@@ -1,0 +1,131 @@
+<svg viewBox="0 0 1400 1560" xmlns="http://www.w3.org/2000/svg" font-family="Segoe UI, Arial, sans-serif">
+  <rect x="0" y="0" width="1400" height="1560" fill="#FFFFFF"/>
+  <text x="60" y="52" font-size="26" font-weight="700" fill="#0F172A">Feature Highlights — At a Glance</text>
+  <text x="60" y="80" font-size="15" fill="#64748B">Eight capabilities that make Room Controller easy to deploy, operate, and scale</text>
+
+  <!-- Card template positions: 2 cols x 4 rows -->
+  <!-- Card 1: Multi-Site (Indigo) -->
+  <g transform="translate(60,110)">
+    <rect width="620" height="300" rx="16" fill="#EEF2FF" stroke="#4C63D2" stroke-width="1.4"/>
+    <rect x="0" y="0" width="10" height="300" rx="5" fill="#4C63D2"/>
+    <g transform="translate(36,36)">
+      <rect x="0" y="18" width="46" height="14" rx="3" fill="#4C63D2"/>
+      <rect x="8" y="0" width="46" height="14" rx="3" fill="#4C63D2" opacity="0.55"/>
+      <rect x="16" y="-18" width="46" height="14" rx="3" fill="#4C63D2" opacity="0.3"/>
+    </g>
+    <text x="36" y="110" font-size="19" font-weight="700" fill="#1E2A5E">Multi-Site &amp; Multi-Room</text>
+    <text x="36" y="133" font-size="19" font-weight="700" fill="#1E2A5E">Management</text>
+    <text x="36" y="168" font-size="14" fill="#334155">One dashboard runs unlimited sites and rooms.</text>
+    <text x="36" y="190" font-size="14" fill="#334155">Each site is auto-numbered — no manual codes,</text>
+    <text x="36" y="212" font-size="14" fill="#334155">no setup collisions when adding a new property.</text>
+  </g>
+
+  <!-- Card 2: Scheduling (Teal) -->
+  <g transform="translate(720,110)">
+    <rect width="620" height="300" rx="16" fill="#F0FDFA" stroke="#0D9488" stroke-width="1.4"/>
+    <rect x="0" y="0" width="10" height="300" rx="5" fill="#0D9488"/>
+    <g transform="translate(60,58)">
+      <circle cx="0" cy="0" r="26" fill="none" stroke="#0D9488" stroke-width="4"/>
+      <path d="M0,0 L0,-16" stroke="#0D9488" stroke-width="4" stroke-linecap="round"/>
+      <path d="M0,0 L14,6" stroke="#0D9488" stroke-width="4" stroke-linecap="round"/>
+    </g>
+    <text x="36" y="110" font-size="19" font-weight="700" fill="#0F5C52">Smart Scheduling &amp;</text>
+    <text x="36" y="133" font-size="19" font-weight="700" fill="#0F5C52">Automation</text>
+    <text x="36" y="168" font-size="14" fill="#334155">Recurring daily time-slots per room, manual</text>
+    <text x="36" y="190" font-size="14" fill="#334155">override, and automatic midnight rollover — no</text>
+    <text x="36" y="212" font-size="14" fill="#334155">staff intervention required to keep it running.</text>
+  </g>
+
+  <!-- Card 3: Guest Activation (Amber) -->
+  <g transform="translate(60,430)">
+    <rect width="620" height="300" rx="16" fill="#FFFBEB" stroke="#D97706" stroke-width="1.4"/>
+    <rect x="0" y="0" width="10" height="300" rx="5" fill="#D97706"/>
+    <g transform="translate(36,32)">
+      <rect x="0" y="0" width="52" height="52" rx="4" fill="none" stroke="#D97706" stroke-width="3"/>
+      <rect x="8" y="8" width="12" height="12" fill="#D97706"/>
+      <rect x="32" y="8" width="12" height="12" fill="#D97706"/>
+      <rect x="8" y="32" width="12" height="12" fill="#D97706"/>
+      <rect x="32" y="32" width="12" height="12" fill="#D97706" opacity="0.4"/>
+    </g>
+    <text x="36" y="110" font-size="19" font-weight="700" fill="#7C4A05">Guest Self-Service</text>
+    <text x="36" y="133" font-size="19" font-weight="700" fill="#7C4A05">Activation</text>
+    <text x="36" y="168" font-size="14" fill="#334155">A per-room QR code lets any guest activate their</text>
+    <text x="36" y="190" font-size="14" fill="#334155">booked slot from their own phone — no app, no</text>
+    <text x="36" y="212" font-size="14" fill="#334155">front-desk visit, no account.</text>
+  </g>
+
+  <!-- Card 4: Onboarding (Violet) -->
+  <g transform="translate(720,430)">
+    <rect width="620" height="300" rx="16" fill="#F5F3FF" stroke="#7C3AED" stroke-width="1.4"/>
+    <rect x="0" y="0" width="10" height="300" rx="5" fill="#7C3AED"/>
+    <g transform="translate(60,70)">
+      <path d="M-28,0 A28,28 0 0 1 28,0" fill="none" stroke="#7C3AED" stroke-width="4"/>
+      <path d="M-18,10 A18,18 0 0 1 18,10" fill="none" stroke="#7C3AED" stroke-width="4"/>
+      <circle cx="0" cy="20" r="5" fill="#7C3AED"/>
+    </g>
+    <text x="36" y="110" font-size="19" font-weight="700" fill="#4C1D95">Zero-Touch Device</text>
+    <text x="36" y="133" font-size="19" font-weight="700" fill="#4C1D95">Onboarding</text>
+    <text x="36" y="168" font-size="14" fill="#334155">New hardware configures itself over its own WiFi</text>
+    <text x="36" y="190" font-size="14" fill="#334155">hotspot in minutes. WiFi and backend details can</text>
+    <text x="36" y="212" font-size="14" fill="#334155">be updated later without re-flashing.</text>
+  </g>
+
+  <!-- Card 5: Wiring (Rose) -->
+  <g transform="translate(60,750)">
+    <rect width="620" height="300" rx="16" fill="#FFF1F2" stroke="#E11D48" stroke-width="1.4"/>
+    <rect x="0" y="0" width="10" height="300" rx="5" fill="#E11D48"/>
+    <g transform="translate(36,40)">
+      <rect x="0" y="0" width="60" height="28" rx="14" fill="none" stroke="#E11D48" stroke-width="3"/>
+      <circle cx="44" cy="14" r="10" fill="#E11D48"/>
+    </g>
+    <text x="36" y="110" font-size="19" font-weight="700" fill="#9F1239">Flexible Relay Wiring</text>
+    <text x="36" y="133" font-size="19" font-weight="700" fill="#9F1239">(NC / NO)</text>
+    <text x="36" y="168" font-size="14" fill="#334155">Supports both normally-closed and normally-open</text>
+    <text x="36" y="190" font-size="14" fill="#334155">relay wiring per site, switchable from the</text>
+    <text x="36" y="212" font-size="14" fill="#334155">dashboard with a safety confirmation step.</text>
+  </g>
+
+  <!-- Card 6: Monitoring (Blue) -->
+  <g transform="translate(720,750)">
+    <rect width="620" height="300" rx="16" fill="#EFF6FF" stroke="#2563EB" stroke-width="1.4"/>
+    <rect x="0" y="0" width="10" height="300" rx="5" fill="#2563EB"/>
+    <g transform="translate(36,60)">
+      <path d="M0,15 L18,15 L26,-15 L36,30 L46,0 L64,0" fill="none" stroke="#2563EB" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </g>
+    <text x="36" y="110" font-size="19" font-weight="700" fill="#1E3A8A">Real-Time Monitoring</text>
+    <text x="36" y="133" font-size="19" font-weight="700" fill="#1E3A8A">&amp; Status</text>
+    <text x="36" y="168" font-size="14" fill="#334155">Room and device state sync live to every open</text>
+    <text x="36" y="190" font-size="14" fill="#334155">dashboard via real-time push updates, with</text>
+    <text x="36" y="212" font-size="14" fill="#334155">automatic fallback to polling.</text>
+  </g>
+
+  <!-- Card 7: PWA (Green) -->
+  <g transform="translate(60,1070)">
+    <rect width="620" height="300" rx="16" fill="#F0FDF4" stroke="#16A34A" stroke-width="1.4"/>
+    <rect x="0" y="0" width="10" height="300" rx="5" fill="#16A34A"/>
+    <g transform="translate(56,32)">
+      <rect x="0" y="0" width="34" height="54" rx="6" fill="none" stroke="#16A34A" stroke-width="3.5"/>
+      <circle cx="17" cy="46" r="2.6" fill="#16A34A"/>
+    </g>
+    <text x="36" y="110" font-size="19" font-weight="700" fill="#14532D">Installable Cross-Platform</text>
+    <text x="36" y="133" font-size="19" font-weight="700" fill="#14532D">Dashboard</text>
+    <text x="36" y="168" font-size="14" fill="#334155">A single Progressive Web App installs on any</text>
+    <text x="36" y="190" font-size="14" fill="#334155">phone, tablet, or laptop — no app-store review,</text>
+    <text x="36" y="212" font-size="14" fill="#334155">no per-platform build.</text>
+  </g>
+
+  <!-- Card 8: Reliability (Cyan) -->
+  <g transform="translate(720,1070)">
+    <rect width="620" height="300" rx="16" fill="#ECFEFF" stroke="#0891B2" stroke-width="1.4"/>
+    <rect x="0" y="0" width="10" height="300" rx="5" fill="#0891B2"/>
+    <g transform="translate(56,32)">
+      <path d="M17,0 L34,8 V28 C34,42 26,50 17,54 C8,50 0,42 0,28 V8 Z" fill="none" stroke="#0891B2" stroke-width="3"/>
+      <path d="M9,28 L15,34 L26,20" fill="none" stroke="#0891B2" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </g>
+    <text x="36" y="110" font-size="19" font-weight="700" fill="#164E63">Data Integrity &amp;</text>
+    <text x="36" y="133" font-size="19" font-weight="700" fill="#164E63">Reliability Safeguards</text>
+    <text x="36" y="168" font-size="14" fill="#334155">Built-in protections stop stale or duplicate saves</text>
+    <text x="36" y="190" font-size="14" fill="#334155">from silently overwriting a more recent change,</text>
+    <text x="36" y="212" font-size="14" fill="#334155">even across multiple open sessions.</text>
+  </g>
+</svg>

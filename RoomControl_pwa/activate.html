@@ -1,0 +1,683 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="theme-color" content="#1a1a2e">
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+  <meta http-equiv="Pragma" content="no-cache">
+  <meta http-equiv="Expires" content="0">
+  <link rel="icon" type="image/png" href="icons/icon-192.png">
+  <link rel="apple-touch-icon" href="icons/icon-192.png">
+  <title>Court Activation</title>
+  <style>
+    :root {
+      --bg: #0f0f1a; --surface: #1a1a2e; --card: #22223b; --card2: #2d2d4e;
+      --border: rgba(255,255,255,0.08); --text: #f0f0f5; --muted: #8888aa;
+      --accent: #4a8fff; --amber: #f0a030; --red: #e05050; --green: #40c080;
+      --radius: 12px;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+    body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; min-height: 100vh; }
+
+    .header { background: var(--surface); padding: 16px; text-align: center; border-bottom: 1px solid var(--border); }
+    .header h1 { font-size: 18px; font-weight: 600; }
+    .header p  { font-size: 12px; color: var(--muted); margin-top: 4px; }
+
+    .content { padding: 16px; max-width: 480px; margin: 0 auto; }
+
+    /* Slot list */
+    .room-group { margin-bottom: 12px; }
+    .room-group-title { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 6px; padding: 0 2px; }
+    .slot-card { background: var(--card); border-radius: var(--radius); padding: 12px 14px; margin-bottom: 6px; border: 1px solid var(--border); cursor: pointer; display: flex; align-items: center; gap: 10px; transition: border-color 0.2s; }
+    .slot-card:hover { border-color: var(--accent); }
+    .slot-card.active   { border-color: var(--green); background: rgba(64,192,128,0.06); cursor: default; }
+    .slot-card.locked   { border-color: var(--red);   background: rgba(224,80,80,0.06);  cursor: default; }
+    .slot-card.selected { border-color: var(--accent); background: rgba(74,143,255,0.08); }
+    .slot-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+    .slot-dot.active { background: var(--green); box-shadow: 0 0 6px var(--green); }
+    .slot-dot.locked { background: var(--red); }
+    .slot-dot.pending { background: var(--muted); }
+    .slot-dot.selected { background: var(--accent); }
+    .slot-info { flex: 1; }
+    .slot-time { font-size: 14px; font-weight: 500; }
+    .slot-badge { font-size: 11px; color: var(--muted); margin-top: 2px; }
+    .slot-status-badge { font-size: 11px; padding: 3px 10px; border-radius: 20px; font-weight: 500; }
+    .badge-active { background: rgba(64,192,128,0.15); color: var(--green); }
+    .badge-locked { background: rgba(224,80,80,0.15); color: var(--red); }
+    .badge-tap    { background: rgba(74,143,255,0.12); color: var(--accent); }
+    .no-slots { text-align: center; padding: 40px 20px; color: var(--muted); font-size: 14px; }
+
+    /* PIN pad overlay */
+    .pin-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.7); display: flex; align-items: flex-end; justify-content: center; z-index: 100; opacity: 0; pointer-events: none; transition: opacity 0.25s; }
+    .pin-overlay.show { opacity: 1; pointer-events: all; }
+    .pin-panel { background: var(--surface); border-radius: 20px 20px 0 0; padding: 20px 20px 36px; width: 100%; max-width: 480px; }
+    .pin-title { text-align: center; font-size: 15px; font-weight: 600; margin-bottom: 4px; }
+    .pin-sub   { text-align: center; font-size: 12px; color: var(--muted); margin-bottom: 20px; }
+    .pin-dots  { display: flex; justify-content: center; gap: 14px; margin-bottom: 20px; }
+    .pin-dot   { width: 16px; height: 16px; border-radius: 50%; border: 2px solid var(--muted); transition: all 0.15s; }
+    .pin-dot.filled { background: var(--accent); border-color: var(--accent); }
+    .pin-dot.error  { background: var(--red); border-color: var(--red); animation: shake 0.3s; }
+    .pin-dot.success { background: var(--green); border-color: var(--green); }
+    @keyframes shake { 0%,100%{transform:translateX(0)} 25%{transform:translateX(-4px)} 75%{transform:translateX(4px)} }
+    .pin-grid  { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+    .pin-btn   { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 18px; font-size: 22px; font-weight: 500; color: var(--text); cursor: pointer; text-align: center; user-select: none; transition: background 0.1s; }
+    .pin-btn:active { background: var(--card2); }
+    .pin-btn.del { font-size: 18px; color: var(--muted); }
+    .pin-btn.submit { background: var(--accent); border-color: var(--accent); color: white; }
+    .pin-btn.submit:active { opacity: 0.8; }
+    .pin-error { text-align: center; font-size: 13px; color: var(--red); margin-top: 12px; min-height: 20px; }
+    .pin-cancel { width: 100%; padding: 12px; margin-top: 10px; border-radius: var(--radius); border: 1px solid var(--border); background: transparent; color: var(--muted); font-size: 14px; cursor: pointer; }
+
+    /* Loading */
+    .loading { text-align: center; padding: 60px 20px; color: var(--muted); }
+    .spinner { width: 32px; height: 32px; border: 3px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.8s linear infinite; margin: 0 auto 16px; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* Success flash */
+    .success-overlay { position: fixed; inset: 0; background: rgba(64,192,128,0.15); display: flex; align-items: center; justify-content: center; z-index: 200; opacity: 0; pointer-events: none; transition: opacity 0.3s; }
+    .success-overlay.show { opacity: 1; }
+    .success-box { background: var(--card); border-radius: var(--radius); padding: 32px; text-align: center; border: 1px solid var(--green); }
+    .success-icon { font-size: 48px; margin-bottom: 12px; }
+    .success-text { font-size: 18px; font-weight: 600; color: var(--green); }
+    .success-sub  { font-size: 13px; color: var(--muted); margin-top: 6px; }
+    .product-info-footer { text-align: center; font-size: 12px; color: var(--muted); padding: 20px 16px 24px; line-height: 1.6; }
+    .product-info-footer a { color: var(--accent); text-decoration: none; }
+  </style>
+</head>
+<body>
+
+<div class="header">
+  <h1><span id="profileName"></span>Court Activation</h1>
+  <p id="headerDate"></p>
+</div>
+
+<div class="content">
+  <div class="loading" id="loadingState">
+    <div class="spinner"></div>
+    Loading today's slots…
+  </div>
+  <div id="slotList" style="display:none"></div>
+</div>
+
+<div class="product-info-footer" id="productInfoFooter"></div>
+
+<!-- PIN pad overlay -->
+<div class="pin-overlay" id="pinOverlay">
+  <div class="pin-panel">
+    <div class="pin-title" id="pinTitle">Enter activation code</div>
+    <div class="pin-sub"  id="pinSub"></div>
+    <div class="pin-dots" id="pinDots">
+      <div class="pin-dot" id="pd0"></div>
+      <div class="pin-dot" id="pd1"></div>
+      <div class="pin-dot" id="pd2"></div>
+      <div class="pin-dot" id="pd3"></div>
+    </div>
+    <div class="pin-grid">
+      <button class="pin-btn" onclick="pinPress('1')">1</button>
+      <button class="pin-btn" onclick="pinPress('2')">2</button>
+      <button class="pin-btn" onclick="pinPress('3')">3</button>
+      <button class="pin-btn" onclick="pinPress('4')">4</button>
+      <button class="pin-btn" onclick="pinPress('5')">5</button>
+      <button class="pin-btn" onclick="pinPress('6')">6</button>
+      <button class="pin-btn" onclick="pinPress('7')">7</button>
+      <button class="pin-btn" onclick="pinPress('8')">8</button>
+      <button class="pin-btn" onclick="pinPress('9')">9</button>
+      <button class="pin-btn del" onclick="pinDel()">⌫</button>
+      <button class="pin-btn" onclick="pinPress('0')">0</button>
+      <button class="pin-btn submit" onclick="pinSubmit()">✓</button>
+    </div>
+    <div class="pin-error" id="pinError"></div>
+    <button class="pin-cancel" onclick="closePin()">Cancel</button>
+  </div>
+</div>
+
+<!-- Success overlay -->
+<div class="success-overlay" id="successOverlay">
+  <div class="success-box">
+    <div class="success-icon">✅</div>
+    <div class="success-text">Room Activated!</div>
+    <div class="success-sub" id="successSub"></div>
+  </div>
+</div>
+
+<script src="product-info.js"></script>
+<script>
+document.getElementById('productInfoFooter').innerHTML = productInfoHtml();
+
+// ── Config — supplied via ?db=&p= baked into each profile's QR/activation link ──
+// p = the profile's numeric Firebase key (/profiles/{p}/...) — profiles sharing
+// one database are namespaced this way; the profile's name is never part of
+// the path, just a display property, so it's not needed here at all.
+const FIREBASE_URL   = new URLSearchParams(location.search).get('db') || '';
+const PROFILE_NUM    = new URLSearchParams(location.search).get('p') || '';
+const PROFILE_PREFIX = PROFILE_NUM ? '/profiles/' + PROFILE_NUM : '';
+
+// ── State ─────────────────────────────────────────────────────
+let allRooms     = [];
+let adminSeed    = '1234';
+let selectedRoom = null;
+let selectedSlot = null;
+let pinValue     = '';
+let loadingSlots = false;  // prevent duplicate concurrent loads
+
+// ── Helpers ───────────────────────────────────────────────────
+function toMins(t) { const [h,m]=t.split(':').map(Number); return h*60+m; }
+
+function nowMins() {
+  const n = new Date(); return n.getHours()*60 + n.getMinutes();
+}
+
+function todayStr() {
+  const d = new Date();
+  return d.getFullYear() + '-' +
+    String(d.getMonth()+1).padStart(2,'0') + '-' +
+    String(d.getDate()).padStart(2,'0');
+}
+
+function tomorrowStr() {
+  const d = new Date(); d.setDate(d.getDate()+1);
+  return d.getFullYear() + '-' +
+    String(d.getMonth()+1).padStart(2,'0') + '-' +
+    String(d.getDate()).padStart(2,'0');
+}
+
+function getAdminCode(seed) {
+  const now = new Date();
+  const dateNum = now.getFullYear() * 10000 +
+                  (now.getMonth()+1) * 100 +
+                  now.getDate();
+  return String((dateNum * parseInt(seed || 1234)) % 10000).padStart(4, '0');
+}
+
+// ── Firebase REST ─────────────────────────────────────────────
+async function fbGet(path) {
+  try {
+    // Add timestamp to bust any HTTP cache layer
+    const url = FIREBASE_URL + PROFILE_PREFIX + path + '.json?nc=' + Date.now();
+    // Explicit Accept — without it, Firebase can occasionally serve the SSE
+    // event-stream format on this URL instead of plain JSON while a listener
+    // is open on the same path, which breaks res.json()
+    const res = await fetch(url, { cache: 'no-store', headers: { 'Accept': 'application/json' } });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch(e) {
+    return null;
+  }
+}
+
+async function fbPut(path, value) {
+  try {
+    await fetch(FIREBASE_URL + PROFILE_PREFIX + path + '.json', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+      body: JSON.stringify(value)
+    });
+    return true;
+  } catch(e) { return false; }
+}
+
+// ── Load today's slots ────────────────────────────────────────
+// Returns true if user is actively interacting — don't interrupt
+function userIsBusy() {
+  const pinOpen     = document.getElementById('pinOverlay')?.classList.contains('show');
+  const successOpen = document.getElementById('successOverlay')?.classList.contains('show');
+  return pinOpen || successOpen;
+}
+
+async function loadSlots() {
+  if (!FIREBASE_URL || !PROFILE_NUM) {
+    document.getElementById('loadingState').style.display = 'none';
+    document.getElementById('slotList').style.display = 'block';
+    document.getElementById('slotList').innerHTML =
+      `<div class="no-slots">This activation link is missing its configuration.<br>
+        <span style="font-size:12px;color:var(--muted);margin-top:8px;display:block">
+          Please re-scan the QR code from the ${PRODUCT_INFO.name} dashboard.
+        </span>
+      </div>`;
+    return;
+  }
+  if (loadingSlots) return;
+  if (userIsBusy()) return;  // don't refresh while PIN pad is open
+  loadingSlots = true;
+  const prevAllRooms = allRooms; // save before clearing — used to preserve activation state
+  allRooms = [];
+
+  const showError = (msg) => {
+    document.getElementById('loadingState').style.display = 'none';
+    document.getElementById('slotList').style.display = 'block';
+    document.getElementById('slotList').innerHTML =
+      `<div class="no-slots">${msg}</div>`;
+    loadingSlots = false;
+  };
+
+  try {
+    const today = todayStr();
+    const nm    = nowMins();
+
+    // Read admin seed
+    const seedVal = await fbGet('/config/adminSeed');
+    if (seedVal) adminSeed = String(seedVal);
+
+    // Read rooms list for names
+    const rooms = await fbGet('/rooms');
+    if (!rooms) { showError('Could not connect to Firebase.<br>Check your internet connection.'); return; }
+
+    const roomKeys = Object.keys(rooms).sort();
+
+    for (const key of roomKeys) {
+      const room    = rooms[key];
+      const roomId  = parseInt(key.replace('room', ''));
+      const roomName = room.name || key;
+
+      // Fetch slots directly — Firebase stores as nested object {"0":{...}}
+      const rawSlots = await fbGet('/rooms/' + key + '/slots');  // always fresh
+
+      // Normalize to array
+      let slotsArr = [];
+      if (!rawSlots) {
+        slotsArr = [];
+      } else if (Array.isArray(rawSlots)) {
+        slotsArr = rawSlots;
+      } else {
+        slotsArr = Object.keys(rawSlots)
+          .sort((a, b) => parseInt(a) - parseInt(b))
+          .map(k => rawSlots[k]);
+      }
+
+      // Only valid slots with s and e fields
+      const slots = slotsArr.filter(s => s && s.s && s.e);
+
+      // Show all slots not yet ended, except tomorrow's
+      const todaySlots = [];
+      slots.forEach((sl, originalIndex) => {
+        if (sl.date === tomorrowStr()) return; // skip tomorrow
+        if (toMins(sl.e) <= nm) return;        // skip ended
+
+        const mergedSlot = { ...sl, origIdx: originalIndex, roomKey: key };
+
+        // Preserve activation state from previous allRooms if Firebase returns null
+        // Match by room + origIdx (Firebase index) for exact slot identification
+        // Prevents wrong slot's activation being applied to a different slot
+        if (!mergedSlot.activatedAt) {
+          const roomId  = parseInt(key.replace('room', ''));
+          const prevRoom = prevAllRooms.find(r => r.id === roomId);
+          const prevSlot = prevRoom && prevRoom.slots.find(
+            ps => ps.origIdx === originalIndex  // exact Firebase index match
+          );
+          if (prevSlot && prevSlot.activatedAt) {
+            mergedSlot.activatedAt = prevSlot.activatedAt;
+            mergedSlot.activatedBy = prevSlot.activatedBy;
+          }
+        }
+        todaySlots.push(mergedSlot);
+      });
+
+      if (todaySlots.length > 0) {
+        allRooms.push({ id: roomId, name: roomName, slots: todaySlots });
+      }
+    }
+
+    document.getElementById('loadingState').style.display = 'none';
+    renderSlots();
+    verifyAndRender(); // verify Waiting slots against Firebase
+
+  } catch(e) {
+    showError('Error loading slots. Please refresh the page.');
+  } finally {
+    loadingSlots = false;
+  }
+}
+
+// ── Verify slot activation status directly from Firebase ────────
+// Called before showing "Waiting" to confirm slot is truly not activated
+async function verifyAndRender() {
+  const nm = nowMins();
+  let needsRerender = false;
+
+  for (const room of allRooms) {
+    for (const sl of room.slots) {
+      // Only verify slots currently in time window that appear unactivated
+      const isCurrent = toMins(sl.s) <= nm && toMins(sl.e) > nm;
+      if (!isCurrent || sl.activatedAt || !sl.code) continue;
+
+      // Fetch latest activatedAt directly from Firebase
+      const val = await fbGet(`/rooms/${sl.roomKey}/slots/${sl.origIdx}/activatedAt`);
+      if (val && val !== null) {
+        sl.activatedAt = val; // update local — slot IS activated
+        needsRerender = true;
+      }
+    }
+  }
+
+  if (needsRerender) renderSlots();
+}
+
+// ── Render slots ──────────────────────────────────────────────
+function renderSlots() {
+  const nm  = nowMins();
+  const container = document.getElementById('slotList');
+  container.style.display = 'block';
+
+  if (allRooms.length === 0) {
+    const nm2 = nowMins();
+    const h = Math.floor(nm2/60).toString().padStart(2,'0');
+    const m = (nm2%60).toString().padStart(2,'0');
+    container.innerHTML = `<div class="no-slots">
+      No slots available for today.<br>
+      <span style="font-size:12px;color:var(--muted);margin-top:8px;display:block">
+        Current time: ${h}:${m} · Date: ${todayStr()}<br>
+        Slots only show if: created for today, not yet ended, and not expired.
+      </span>
+    </div>`;
+    return;
+  }
+
+  container.innerHTML = allRooms.map(room => {
+    const slotCards = room.slots.map((sl, si) => {
+      const isActive   = !!sl.activatedAt;
+      const isExpired  = !!sl.expired;
+      const isLocked   = !!(sl.lockedUntil && Date.now() < sl.lockedUntil);
+      const lockMins   = isLocked ? Math.ceil((sl.lockedUntil - Date.now()) / 60000) : 0;
+      const isCurrent  = toMins(sl.s) <= nm && toMins(sl.e) > nm;
+      const isWaiting  = !isActive && !isExpired && !!sl.code && isCurrent;
+
+      const isAutoApproved = !sl.code; // no code = auto-approved slot
+      let cardClass = 'slot-card';
+      let dotClass  = 'slot-dot pending';
+      let badge     = isAutoApproved
+        ? `<span class="slot-status-badge" style="background:rgba(64,192,128,0.12);color:var(--green)">⚡ Auto</span>`
+        : `<span class="slot-status-badge badge-tap">Tap to activate</span>`;
+
+      if (isActive || isAutoApproved) {
+        cardClass += ' active';
+        dotClass   = 'slot-dot active';
+        badge      = isAutoApproved
+          ? `<span class="slot-status-badge" style="background:rgba(64,192,128,0.12);color:var(--green)">⚡ Auto active</span>`
+          : `<span class="slot-status-badge badge-active">✓ Active</span>`;
+      } else if (isExpired) {
+        cardClass += ' locked';
+        dotClass   = 'slot-dot locked';
+        badge      = `<span class="slot-status-badge" style="background:rgba(136,136,136,0.15);color:#888">Expired</span>`;
+      } else if (isWaiting) {
+        dotClass   = 'slot-dot';
+        badge      = `<span class="slot-status-badge" style="background:rgba(240,160,48,0.15);color:#f0a030">⏳ Waiting</span>`;
+      } else if (isLocked) {
+        cardClass += ' locked';
+        dotClass   = 'slot-dot locked';
+        badge      = `<span class="slot-status-badge badge-locked">🔒 Locked ${lockMins}min</span>`;
+      }
+
+      // Auto-approved and expired slots don't need PIN pad
+      const onclick = (!isActive && !isLocked && !isAutoApproved && !isExpired)
+        ? `onclick="selectSlot(${room.id}, ${si})"`
+        : '';
+
+      return `<div class="${cardClass}" ${onclick} id="slot-${room.id}-${si}">
+        <div class="${dotClass}"></div>
+        <div class="slot-info">
+          <div class="slot-time">${sl.s} – ${sl.e}${sl.bookedBy ? ` · ${sl.bookedBy}` : ''}</div>
+          <div class="slot-badge">${sl.recurring ? 'Recurring' : 'One-time'}${isCurrent ? ' · Active now' : ''}</div>
+        </div>
+        ${badge}
+      </div>`;
+    }).join('');
+
+    return `<div class="room-group">
+      <div class="room-group-title">${room.name}</div>
+      ${slotCards}
+    </div>`;
+  }).join('');
+}
+
+// ── Select slot → show PIN pad ────────────────────────────────
+function selectSlot(roomId, slotIdx) {
+  const room = allRooms.find(r => r.id === roomId);
+  if (!room) return;
+  selectedRoom = room;
+  selectedSlot = room.slots[slotIdx];
+
+  pinValue = '';
+  updatePinDots();
+  document.getElementById('pinTitle').textContent = 'Enter activation code';
+  document.getElementById('pinSub').textContent   =
+    `${room.name} · ${selectedSlot.s} – ${selectedSlot.e}`;
+  document.getElementById('pinError').textContent = '';
+
+  const attempts = selectedSlot.attempts || 0;
+  if (attempts > 0) {
+    document.getElementById('pinError').textContent =
+      `${attempts}/3 attempts used`;
+  }
+
+  document.getElementById('pinOverlay').classList.add('show');
+}
+
+function closePin() {
+  document.getElementById('pinOverlay').classList.remove('show');
+  pinValue = '';
+  updatePinDots();
+  document.getElementById('pinError').textContent = '';
+  selectedRoom = null;
+  selectedSlot = null;
+}
+
+// ── PIN pad logic ─────────────────────────────────────────────
+function pinPress(digit) {
+  if (pinValue.length >= 4) return;
+  pinValue += digit;
+  updatePinDots();
+  if (pinValue.length === 4) setTimeout(pinSubmit, 200);
+}
+
+function pinDel() {
+  pinValue = pinValue.slice(0, -1);
+  updatePinDots();
+  document.getElementById('pinError').textContent = '';
+}
+
+function updatePinDots(state) {
+  for (let i = 0; i < 4; i++) {
+    const dot = document.getElementById('pd' + i);
+    dot.className = 'pin-dot';
+    if (state === 'error')   dot.className += ' error';
+    else if (state === 'ok') dot.className += ' success';
+    else if (i < pinValue.length) dot.className += ' filled';
+  }
+}
+
+async function pinSubmit() {
+  if (!selectedSlot || pinValue.length !== 4) return;
+
+  const adminCode = getAdminCode(adminSeed);
+  const slotCode  = String(selectedSlot.code || '');
+  const isAdmin   = pinValue === adminCode;
+  const isSlot    = pinValue === slotCode;
+
+  try {
+    if (isAdmin || isSlot) {
+      // ── Correct code ─────────────────────────────────────────
+      updatePinDots('ok');
+
+      // Write activatedAt to Firebase
+      const slotBasePath = `/rooms/${selectedSlot.roomKey}/slots/${selectedSlot.origIdx}`;
+      await fbPut(slotBasePath + '/activatedAt', Date.now());
+      await fbPut(slotBasePath + '/activatedBy', isAdmin ? 'admin' : 'slot');
+      await fbPut(slotBasePath + '/attempts',    0);
+      await fbPut(slotBasePath + '/lockedUntil', null);
+
+      // Close PIN, show success, then full refresh
+      document.getElementById('pinOverlay').classList.remove('show');
+      pinValue = '';
+      updatePinDots();
+      document.getElementById('successSub').textContent =
+        `${selectedRoom.name} · ${selectedSlot.s} – ${selectedSlot.e}`;
+      document.getElementById('successOverlay').classList.add('show');
+      setTimeout(() => {
+        document.getElementById('successOverlay').classList.remove('show');
+        loadingSlots = false;
+        loadSlots(); // Full refresh from Firebase
+        // Auto-close 5 seconds after a successful activation, so whoever
+        // scanned the QR code doesn't have to close the tab themselves.
+        setTimeout(() => closePage('activated'), 5000);
+      }, 1500);
+
+    } else {
+      // ── Wrong code ───────────────────────────────────────────
+      updatePinDots('error');
+
+      const slotPath2 = `/rooms/${selectedSlot.roomKey}/slots/${selectedSlot.origIdx}`;
+      // Read current attempts count directly
+      const currentAttempts = await fbGet(slotPath2 + '/attempts') || 0;
+      const attempts = currentAttempts + 1;
+      await fbPut(slotPath2 + '/attempts', attempts);
+
+      if (attempts >= 3) {
+        const lockUntil = Date.now() + 5 * 60 * 1000;
+        await fbPut(slotPath2 + '/lockedUntil', lockUntil);
+        setTimeout(() => {
+          document.getElementById('pinOverlay').classList.remove('show');
+          pinValue = ''; updatePinDots(); loadSlots();
+        }, 800);
+        document.getElementById('pinError').textContent =
+          '3 attempts reached — locked for 5 minutes';
+      } else {
+        document.getElementById('pinError').textContent =
+          `Wrong code — ${3 - attempts} attempt${3-attempts===1?'':'s'} remaining`;
+      }
+
+      setTimeout(() => { pinValue = ''; updatePinDots(); }, 600);
+    }
+
+  } catch(err) {
+    document.getElementById('pinError').textContent = 'Network error — please try again';
+    setTimeout(() => { pinValue = ''; updatePinDots(); }, 600);
+  }
+}
+
+// ── Boot ──────────────────────────────────────────────────────
+document.getElementById('headerDate').textContent =
+  new Date().toLocaleDateString([], { weekday:'long', month:'long', day:'numeric' });
+
+// ── Auto-close (lifetime + idle) ──────────────────────────────
+// The activation page is meant to be short-lived: it closes 5s after a
+// successful activation (see pinSubmit), after 30s with no interaction,
+// or 2 min after opening no matter what. Browsers only allow a
+// script-initiated window.close() on a tab that a script itself opened.
+// Most QR scanners hand the link to the OS, which opens a normal tab, so
+// window.close() silently does nothing there — in that case we replace the
+// page with a "you may close this tab" message instead of leaving the
+// live, auto-refreshing booking UI open.
+const MAX_LIFETIME_MS = 2 * 60 * 1000; // hard cap: 2 minutes
+const IDLE_TIMEOUT_MS = 30 * 1000;     // idle cap: 30 seconds
+let pageClosed = false;
+
+function closePage(reason) {
+  if (pageClosed) return;
+  pageClosed = true;
+
+  // Stop background work so nothing keeps the page busy after we intend to close
+  if (typeof idleTimer !== 'undefined' && idleTimer) clearTimeout(idleTimer);
+  if (typeof lifetimeTimer !== 'undefined' && lifetimeTimer) clearTimeout(lifetimeTimer);
+
+  window.close();
+
+  // If window.close() was a no-op (non-script-opened tab), show a closing message
+  setTimeout(() => {
+    document.body.innerHTML =
+      '<div style="min-height:100vh;display:flex;flex-direction:column;' +
+      'align-items:center;justify-content:center;text-align:center;padding:24px;' +
+      'font-family:system-ui,-apple-system,sans-serif;color:#888;gap:12px;">' +
+      '<div style="font-size:40px">👋</div>' +
+      '<div style="font-size:16px">' +
+      (reason === 'activated' ? 'Activation complete.' : 'Session timed out.') +
+      '</div>' +
+      '<div style="font-size:13px">You can close this tab now.</div>' +
+      '</div>';
+  }, 300);
+}
+
+// Hard 2-minute lifetime cap — fires regardless of activity.
+let lifetimeTimer = setTimeout(() => closePage('timeout'), MAX_LIFETIME_MS);
+
+// 30-second idle timer — reset on any user interaction.
+let idleTimer = setTimeout(() => closePage('timeout'), IDLE_TIMEOUT_MS);
+function resetIdleTimer() {
+  if (pageClosed) return;
+  clearTimeout(idleTimer);
+  idleTimer = setTimeout(() => closePage('timeout'), IDLE_TIMEOUT_MS);
+}
+['pointerdown', 'keydown', 'touchstart', 'click'].forEach(evt => {
+  document.addEventListener(evt, resetIdleTimer, { passive: true });
+});
+
+// Show the profile's display name in front of the "Court Activation" heading.
+// The name is a display-only property at /profiles/{p}/name (see the dashboard's
+// pushProfileName). fbGet is already prefixed with /profiles/{PROFILE_NUM}.
+async function loadProfileName() {
+  if (!FIREBASE_URL || !PROFILE_NUM) return;
+  try {
+    const name = await fbGet('/name');
+    if (name) {
+      document.getElementById('profileName').textContent = name + ' — ';
+    }
+  } catch (e) { /* non-critical; heading falls back to "Court Activation" */ }
+}
+loadProfileName();
+
+loadSlots();
+
+if (FIREBASE_URL && PROFILE_NUM) {
+  // Safety timeout — if still showing loading after 10 sec, retry once
+  setTimeout(() => {
+    const ls = document.getElementById('loadingState');
+    if (ls && ls.style.display !== 'none') {
+      loadingSlots = false;
+      loadSlots();
+    }
+  }, 10000);
+
+  // Full refresh every 10 seconds — always fresh from Firebase, no cache
+  setInterval(() => loadSlots(), 10000);
+
+  // Firebase SSE — refresh when any data changes. Debounced (via
+  // scheduleRefresh below), NOT an immediate loadSlots() per event — a
+  // single PWA-side save (pushRoom) fires many sequential PATCH/PUT calls
+  // for one room (room fields, then one per slot, then ghost-index
+  // pruning, then slotsT), each its own SSE event. Refreshing on every
+  // individual event mid-write rendered a different partial snapshot each
+  // time — old and new slots visible together for a moment — because the
+  // fetch was racing an update that was still in progress across multiple
+  // requests. The PWA already does one complete, coherent write overall;
+  // this just waits for that burst to go quiet before reading it once.
+  (function startSSE() {
+    try {
+      const es = new EventSource(FIREBASE_URL + PROFILE_PREFIX + '/rooms.json');
+      // Do NOT reset loadingSlots — let the guard prevent concurrent loads
+      es.addEventListener('put',   scheduleRefresh);
+      es.addEventListener('patch', scheduleRefresh);
+      es.onerror = () => es.close();
+    } catch(e) {}
+  })();
+}
+
+// Reload slots whenever page becomes visible again (user switches back to tab/app)
+// or Firebase reports a change (see startSSE() above) — debounced so a
+// burst of several rapid updates settles into exactly one full reload
+// instead of one per individual event.
+let refreshTimer = null;
+function scheduleRefresh() {
+  if (refreshTimer) clearTimeout(refreshTimer);
+  refreshTimer = setTimeout(() => {
+    refreshTimer = null;
+    loadSlots();
+  }, 500);
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') scheduleRefresh();
+});
+window.addEventListener('focus', scheduleRefresh);
+window.addEventListener('pageshow', e => { if (e.persisted) scheduleRefresh(); });
+</script>
+</body>
+</html>
