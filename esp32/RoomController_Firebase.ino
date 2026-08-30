@@ -368,7 +368,7 @@ void pushStatus(int idx) {
 }
 
 void pushAllStatus() {
-  for (int i = 0; i < roomCount; i++) { pushStatus(i); delay(150); }
+  for (int i = 0; i < roomCount; i++) { pushStatus(i); warningAwareDelay(150); }
 }
 
 // ── Parse an integer field like "relayPin":26 — returns PIN_NONE if the
@@ -643,7 +643,7 @@ void refreshSlotsOnly() {
         applyState(i);
       }
     }
-    delay(150);
+    warningAwareDelay(150);
   }
 }
 
@@ -653,7 +653,7 @@ void pollOverrides() {
     String val = fbGet("/rooms/room" + String(i + 1) + "/override");
 
     // Skip bad reads — NEVER change state on error
-    if (val == "error" || val == "") { delay(100); continue; }
+    if (val == "error" || val == "") { warningAwareDelay(100); continue; }
 
     int newOvr;
     if      (val == "true"  || val == "1")  newOvr = 1;
@@ -661,13 +661,13 @@ void pollOverrides() {
     else if (val == "null"  || val == "-1") newOvr = -1;
     else {
       // Unknown value — skip, never change active override
-      delay(100); continue;
+      warningAwareDelay(100); continue;
     }
 
     // Extra guard: if manual override is active and new value is auto (-1)
     // only accept if Firebase returned full "null" string — not a short bad read
     if (rooms[i].ovr != -1 && newOvr == -1 && val.length() < 4) {
-      delay(100); continue;
+      warningAwareDelay(100); continue;
     }
 
     if (newOvr != rooms[i].ovr) {
@@ -676,7 +676,7 @@ void pollOverrides() {
       applyState(i);
       pushStatus(i);
     }
-    delay(100);
+    warningAwareDelay(100);
   }
 }
 
@@ -1123,6 +1123,21 @@ void serviceWarningLeds() {
     digitalWrite(rooms[i].ledPin, rooms[i].ledBlinkOn ? LED_ON : LED_OFF);
   }
   (void)anyWarning;
+}
+
+// A delay() replacement that keeps the warning LED blink + beeper serviced
+// while it waits. The Firebase poll/push loops (pollOverrides, refreshSlotsOnly,
+// pushAllStatus) each block for hundreds of ms per room plus up to a 5s HTTP
+// timeout; during a plain delay()/blocking fetch the loop() can't run, so the
+// blink froze mid-cycle for seconds (the "off for a few sec, then blinks"
+// symptom). Slicing the wait and pumping the outputs keeps the blink rhythmic.
+void warningAwareDelay(unsigned long ms) {
+  unsigned long start = millis();
+  while (millis() - start < ms) {
+    serviceWarningLeds();
+    serviceBeeper();
+    delay(5);
+  }
 }
 
 // Recomputes each room's warning flag from the clock + activated slots, and
