@@ -162,7 +162,7 @@ const unsigned long SLOT_REFRESH      = 10000;  // slot refresh every 10 sec —
 const unsigned long HEARTBEAT         = 300000; // heartbeat every 5 min
 
 // ── End-of-slot warning timing (non-blocking) ────────────────
-const unsigned long LED_BLINK_INTERVAL = 400;  // LED toggle period during a warning window
+const unsigned long LED_BLINK_INTERVAL = 100;  // LED toggle period during a warning window (faster blink)
 const unsigned long BEEP_ON_MS         = 5000; // beep on-time — 5s pulse for a bell driven via relay
 const unsigned long BEEP_GAP_MS        = 150;  // silence between beeps in the burst
 const int           BEEP_BURST_COUNT   = 1;    // single beep at window start — one-shot, never continuous
