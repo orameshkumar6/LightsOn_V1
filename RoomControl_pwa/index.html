@@ -652,6 +652,19 @@ function makeBlankRooms() {
   }));
 }
 const DAYS = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+
+// Compact label for a recurring slot's weekday set. Collapses a fully
+// contiguous run to a range ("Mon–Fri"), otherwise lists them ("Mon, Wed, Fri").
+// Empty/all-7 → "daily" (caller usually won't show it in that case).
+function formatDaySet(days) {
+  if (!Array.isArray(days) || days.length === 0 || days.length === 7) return 'daily';
+  const sorted = [...new Set(days)].filter(d => d >= 0 && d <= 6).sort((a,b) => a-b);
+  if (sorted.length === 0) return 'daily';
+  let contiguous = true;
+  for (let i = 1; i < sorted.length; i++) if (sorted[i] !== sorted[i-1] + 1) { contiguous = false; break; }
+  if (contiguous && sorted.length >= 3) return DAYS[sorted[0]] + '–' + DAYS[sorted[sorted.length-1]];
+  return sorted.map(d => DAYS[d]).join(', ');
+}
 let fbConnected = false;
 let fbListener = null;
 let tlView = '12h';
@@ -2846,39 +2859,40 @@ async function applyRecurring(id) {
   if (!r.recurring.start || !r.recurring.end || r.recurring.start >= r.recurring.end) {
     showToast('⚠️ Invalid time range'); return;
   }
-  const today = new Date().getDay();
-  let anyOverlap = false;
-  [0,1].forEach(day => {
-    const d = (today + day) % 7;
-    if (r.recurring.days.includes(d)) {
-      if (!r.slots[day]) r.slots[day] = [];
-      const exists = r.slots[day].some(sl =>
-        sl.s === r.recurring.start && sl.e === r.recurring.end);
-      if (!exists) {
-        const overlapping = r.slots[day].filter(sl =>
-          slotsOverlap(r.recurring.start, r.recurring.end, sl.s, sl.e));
-        if (overlapping.length > 0) anyOverlap = true;
-        r.slots[day].push({
-          s: r.recurring.start, e: r.recurring.end,
-          recurring: true, code: generate4DigitCode(),
-          // Per-slot weekday set (0=Sun..6=Sat) — this is what makes the
-          // recurrence day-specific: rollover (PWA + ESP32) keeps/re-adds this
-          // slot only on days in this list. Empty/absent = every day (back-compat).
-          days: [...r.recurring.days],
-          activatedAt: null, activatedBy: null,
-          attempts: 0, lockedUntil: null, expired: false,
-          _fresh: true,
-          date: day === 0 ? todayStr() : (() => {
-            const dt = new Date(); dt.setDate(dt.getDate()+1);
-            return dt.getFullYear()+'-'+String(dt.getMonth()+1).padStart(2,'0')+'-'+String(dt.getDate()).padStart(2,'0');
-          })()
-        });
-      }
-    }
+  // Create ONE recurring slot in today's bucket, carrying the selected weekday
+  // set. It is created regardless of whether today is one of those days — the
+  // weekday gate (recurringRunsToday / ESP32 slotRunsToday) decides when it's
+  // actually live, and rollover keeps it in the bucket every day so it's there
+  // when a matching day arrives. This is why e.g. adding a Mon–Fri slot on a
+  // Saturday still saves it (dormant over the weekend, active from Monday) —
+  // the old code only created it if today/tomorrow matched, so a weekday-only
+  // slot added on a weekend saved nothing at all.
+  if (!r.slots[0]) r.slots[0] = [];
+  const exists = r.slots[0].some(sl =>
+    sl.recurring && sl.s === r.recurring.start && sl.e === r.recurring.end &&
+    JSON.stringify((sl.days || []).slice().sort()) === JSON.stringify(r.recurring.days.slice().sort()));
+  if (exists) { showToast('⚠️ That recurring slot already exists'); return; }
+
+  const overlapping = r.slots[0].filter(sl =>
+    slotsOverlap(r.recurring.start, r.recurring.end, sl.s, sl.e));
+  const anyOverlap = overlapping.length > 0;
+
+  r.slots[0].push({
+    s: r.recurring.start, e: r.recurring.end,
+    recurring: true, code: generate4DigitCode(),
+    // Per-slot weekday set (0=Sun..6=Sat) — makes the recurrence day-specific:
+    // rollover (PWA + ESP32) keeps this slot every day, and the weekday gate
+    // decides when it's live. Empty = every day (back-compat).
+    days: [...r.recurring.days],
+    activatedAt: null, activatedBy: null,
+    attempts: 0, lockedUntil: null, expired: false,
+    _fresh: true,
+    date: todayStr()
   });
+
   markRoomDirty(id-1);
   persist(); await pushRoom(id-1); renderDashboard();
-  showToast(anyOverlap ? '⚠️ Overlap detected' : '✓ Recurring applied');
+  showToast(anyOverlap ? '⚠️ Recurring saved (overlaps another slot)' : '✓ Recurring saved');
 }
 
 async function setOverride(id, val) {
@@ -3219,11 +3233,21 @@ function renderRoomCard(r) {
             const dotCol   = s.recurring ? 'var(--green)' : 'var(--accent)';
             const badgeBg  = s.recurring ? 'rgba(64,192,128,0.15)' : 'rgba(74,143,255,0.12)';
             const badgeCol = s.recurring ? 'var(--green)' : 'var(--accent)';
-            const badgeTxt = s.recurring ? 'recurring' : 'one-time';
-            return `<div class="slot-item" style="flex-wrap:wrap;gap:5px${isExpired ? ';opacity:0.5' : ''}">
+            // Recurring badge shows its day set (e.g. "Mon–Fri" / "Mon, Wed").
+            // A recurring slot with a days list that doesn't include the day
+            // being viewed is dormant then — shown dimmed with an "off" note so
+            // it's clear why it won't run (e.g. a Mon–Fri slot seen on Saturday).
+            const viewWeekday = state.schedDay === 0 ? new Date().getDay() : (new Date().getDay()+1)%7;
+            const hasDayRestriction = s.recurring && Array.isArray(s.days) && s.days.length && s.days.length < 7;
+            const dormantToday = hasDayRestriction && !s.days.includes(viewWeekday);
+            const badgeTxt = s.recurring
+              ? ('recurring' + (hasDayRestriction ? ' · ' + formatDaySet(s.days) : ''))
+              : 'one-time';
+            return `<div class="slot-item" style="flex-wrap:wrap;gap:5px${(isExpired || dormantToday) ? ';opacity:0.5' : ''}">
               <div class="slot-dot" style="background:${isActive ? 'var(--green)' : isExpired ? 'var(--muted)' : isWaiting ? 'var(--amber)' : dotCol}"></div>
               <span class="slot-time">${s.s} – ${s.e}</span>
               <span style="font-size:10px;padding:1px 6px;border-radius:10px;background:${badgeBg};color:${badgeCol}">${badgeTxt}</span>
+              ${dormantToday ? `<span style="font-size:10px;padding:1px 6px;border-radius:10px;background:rgba(136,136,136,0.15);color:var(--muted)">off ${state.schedDay===0?'today':'tomorrow'}</span>` : ''}
               ${s.code ? `<span class="slot-code" id="slotcode_${r.id}_${i}" onclick="editSlotCode(${r.id},${i})" title="Tap to change code" style="cursor:pointer">${s.code}</span>` : `<span style="font-size:11px;padding:2px 7px;border-radius:6px;background:rgba(64,192,128,0.15);color:var(--green);font-weight:600">Auto</span>`}
               ${isActive   ? `<span class="slot-status active">✓ Active</span>` : ''}
               ${isWaiting  ? `<span class="slot-status waiting">⏳ Waiting</span>` : ''}
