@@ -3256,9 +3256,16 @@ function renderRoomCard(r) {
   // Mon–Fri slot does not appear in Saturday/Sunday's list even though it's
   // stored for persistence. One-time slots and every-day recurring slots
   // (no days list) always show.
+  // IMPORTANT: keep each visible slot's ORIGINAL index in r.slots[schedDay]
+  // (as `origIdx`) — the row's action buttons (activate/deactivate/edit/
+  // delete/code) index into the UNFILTERED array, so passing the filtered
+  // position would target the wrong slot (that was the "stays Waiting / no
+  // Deactivate" bug after the day filter was added).
   const viewedWeekday = state.schedDay === 0 ? new Date().getDay() : (new Date().getDay() + 1) % 7;
-  const slots = (r.slots[state.schedDay] || []).filter(s =>
-    !s.recurring || !Array.isArray(s.days) || s.days.length === 0 || s.days.includes(viewedWeekday));
+  const slots = (r.slots[state.schedDay] || [])
+    .map((s, origIdx) => ({ s, origIdx }))
+    .filter(({ s }) =>
+      !s.recurring || !Array.isArray(s.days) || s.days.length === 0 || s.days.includes(viewedWeekday));
   let body = '';
 
   if (r.expanded) {
@@ -3270,7 +3277,8 @@ function renderRoomCard(r) {
 
     if (r.panelTab === 'slot') {
       const slotItems = slots.length
-        ? slots.map((s,i) => {
+        ? slots.map(({s, origIdx}) => {
+            const i = origIdx; // original index into r.slots[schedDay] — used by all row actions
             const now = new Date();
             const nm = now.getHours()*60+now.getMinutes();
             const ss = toMinsStr(s.s), se = toMinsStr(s.e);
