@@ -3568,7 +3568,15 @@ async function saveActiveProfile() {
   if (!requireLicense('save profile settings')) return;
   const p = getActiveProfile();
   resetConnectionForProfileChange();
+  const prevDbUrl = p.dbUrl; // capture before overwrite — see fbNum reset below
   p.dbUrl     = document.getElementById('cfg-url').value.trim().replace(/\/$/, '');
+  // If the Database URL changed, the profile's fbNum (its /profiles/{n} slot)
+  // was assigned in the OLD database and is meaningless in the new one.
+  // Clear it so ensureProfileNumber() re-scans the NEW db and registers this
+  // profile there (writing /profiles/{n}/name). Without this, the save reused
+  // the stale number, never created the profile node in the new db, and the
+  // data appeared not to save.
+  if (prevDbUrl !== p.dbUrl) p.fbNum = null;
   p.apiKey    = document.getElementById('cfg-key').value.trim();
   p.adminSeed = document.getElementById('cfg-seed').value.trim() || '1234';
   p.whatsappTemplate = document.getElementById('cfg-whatsapp-template').value.trim() || DEFAULT_WHATSAPP_TEMPLATE;
