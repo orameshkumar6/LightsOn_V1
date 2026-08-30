@@ -1258,7 +1258,7 @@ function openRecurringModal(roomId) {
   if (!requireLicense('edit a recurring schedule')) return;
   recModalRoomId = roomId;
   const r = state.rooms.find(x => x.id === roomId);
-  document.getElementById('recModalTitle').textContent = 'Recurring — ' + r.name;
+  document.getElementById('recModalTitle').textContent = 'Create Recurring Slot — ' + r.name;
   document.getElementById('rec_start').value = r.recurring.start || '09:00';
   document.getElementById('rec_end').value   = r.recurring.end   || '10:00';
   // Build day pills
@@ -2859,18 +2859,18 @@ async function applyRecurring(id) {
   if (!r.recurring.start || !r.recurring.end || r.recurring.start >= r.recurring.end) {
     showToast('⚠️ Invalid time range'); return;
   }
-  // Create ONE recurring slot in today's bucket, carrying the selected weekday
-  // set. It is created regardless of whether today is one of those days — the
-  // weekday gate (recurringRunsToday / ESP32 slotRunsToday) decides when it's
-  // actually live, and rollover keeps it in the bucket every day so it's there
-  // when a matching day arrives. This is why e.g. adding a Mon–Fri slot on a
-  // Saturday still saves it (dormant over the weekend, active from Monday) —
-  // the old code only created it if today/tomorrow matched, so a weekday-only
-  // slot added on a weekend saved nothing at all.
+  // Create ONE recurring slot carrying the selected weekday set. It is stored
+  // in today's bucket so it persists to Firebase and rides through rollovers
+  // (so it's present when a matching day arrives — this is why a Mon–Fri slot
+  // created on a Sunday is still saved). Whether it actually RUNS/DISPLAYS on a
+  // given day is decided by the weekday gate (recurringRunsToday); the
+  // dashboard hides recurring slots that don't run on the viewed day, so a
+  // Mon–Fri slot does NOT show up as a Sunday slot.
   if (!r.slots[0]) r.slots[0] = [];
+  const sameDays = arr => JSON.stringify((arr || []).slice().sort());
   const exists = r.slots[0].some(sl =>
     sl.recurring && sl.s === r.recurring.start && sl.e === r.recurring.end &&
-    JSON.stringify((sl.days || []).slice().sort()) === JSON.stringify(r.recurring.days.slice().sort()));
+    sameDays(sl.days) === sameDays(r.recurring.days));
   if (exists) { showToast('⚠️ That recurring slot already exists'); return; }
 
   const overlapping = r.slots[0].filter(sl =>
@@ -2880,9 +2880,6 @@ async function applyRecurring(id) {
   r.slots[0].push({
     s: r.recurring.start, e: r.recurring.end,
     recurring: true, code: generate4DigitCode(),
-    // Per-slot weekday set (0=Sun..6=Sat) — makes the recurrence day-specific:
-    // rollover (PWA + ESP32) keeps this slot every day, and the weekday gate
-    // decides when it's live. Empty = every day (back-compat).
     days: [...r.recurring.days],
     activatedAt: null, activatedBy: null,
     attempts: 0, lockedUntil: null, expired: false,
@@ -2892,7 +2889,10 @@ async function applyRecurring(id) {
 
   markRoomDirty(id-1);
   persist(); await pushRoom(id-1); renderDashboard();
-  showToast(anyOverlap ? '⚠️ Recurring saved (overlaps another slot)' : '✓ Recurring saved');
+  const runsToday = recurringRunsToday({ recurring: true, days: r.recurring.days });
+  showToast(anyOverlap
+    ? '⚠️ Recurring saved (overlaps another slot)'
+    : ('✓ Recurring saved' + (runsToday ? '' : ' — starts on the next matching day')));
 }
 
 async function setOverride(id, val) {
@@ -3208,7 +3208,13 @@ function renderRoomCard(r) {
   if (r.override === false) { badgeCls = 'room-badge badge-off';  badgeTxt = 'Manual OFF'; }
   if (r.override === null && ls.on) { badgeCls = 'room-badge badge-sched'; badgeTxt = 'Active'; }
 
-  const slots = r.slots[state.schedDay] || [];
+  // Hide recurring slots that don't run on the viewed weekday, so e.g. a
+  // Mon–Fri slot does not appear in Saturday/Sunday's list even though it's
+  // stored for persistence. One-time slots and every-day recurring slots
+  // (no days list) always show.
+  const viewedWeekday = state.schedDay === 0 ? new Date().getDay() : (new Date().getDay() + 1) % 7;
+  const slots = (r.slots[state.schedDay] || []).filter(s =>
+    !s.recurring || !Array.isArray(s.days) || s.days.length === 0 || s.days.includes(viewedWeekday));
   let body = '';
 
   if (r.expanded) {
@@ -3234,20 +3240,16 @@ function renderRoomCard(r) {
             const badgeBg  = s.recurring ? 'rgba(64,192,128,0.15)' : 'rgba(74,143,255,0.12)';
             const badgeCol = s.recurring ? 'var(--green)' : 'var(--accent)';
             // Recurring badge shows its day set (e.g. "Mon–Fri" / "Mon, Wed").
-            // A recurring slot with a days list that doesn't include the day
-            // being viewed is dormant then — shown dimmed with an "off" note so
-            // it's clear why it won't run (e.g. a Mon–Fri slot seen on Saturday).
-            const viewWeekday = state.schedDay === 0 ? new Date().getDay() : (new Date().getDay()+1)%7;
+            // Dormant recurring slots are already filtered out of this list
+            // (see the slots filter above), so any shown here does run today.
             const hasDayRestriction = s.recurring && Array.isArray(s.days) && s.days.length && s.days.length < 7;
-            const dormantToday = hasDayRestriction && !s.days.includes(viewWeekday);
             const badgeTxt = s.recurring
               ? ('recurring' + (hasDayRestriction ? ' · ' + formatDaySet(s.days) : ''))
               : 'one-time';
-            return `<div class="slot-item" style="flex-wrap:wrap;gap:5px${(isExpired || dormantToday) ? ';opacity:0.5' : ''}">
+            return `<div class="slot-item" style="flex-wrap:wrap;gap:5px${isExpired ? ';opacity:0.5' : ''}">
               <div class="slot-dot" style="background:${isActive ? 'var(--green)' : isExpired ? 'var(--muted)' : isWaiting ? 'var(--amber)' : dotCol}"></div>
               <span class="slot-time">${s.s} – ${s.e}</span>
               <span style="font-size:10px;padding:1px 6px;border-radius:10px;background:${badgeBg};color:${badgeCol}">${badgeTxt}</span>
-              ${dormantToday ? `<span style="font-size:10px;padding:1px 6px;border-radius:10px;background:rgba(136,136,136,0.15);color:var(--muted)">off ${state.schedDay===0?'today':'tomorrow'}</span>` : ''}
               ${s.code ? `<span class="slot-code" id="slotcode_${r.id}_${i}" onclick="editSlotCode(${r.id},${i})" title="Tap to change code" style="cursor:pointer">${s.code}</span>` : `<span style="font-size:11px;padding:2px 7px;border-radius:6px;background:rgba(64,192,128,0.15);color:var(--green);font-weight:600">Auto</span>`}
               ${isActive   ? `<span class="slot-status active">✓ Active</span>` : ''}
               ${isWaiting  ? `<span class="slot-status waiting">⏳ Waiting</span>` : ''}
@@ -3269,7 +3271,7 @@ function renderRoomCard(r) {
         </div>
         <div class="slot-list">${slotItems}</div>
         <button class="add-slot-btn" onclick="openSlotModal(${r.id})">+ Add slot</button>
-        <button class="add-slot-btn" style="margin-top:6px;border-color:var(--green);color:var(--green)" onclick="openRecurringModal(${r.id})">⟳ Edit recurring schedule</button>
+        <button class="add-slot-btn" style="margin-top:6px;border-color:var(--green);color:var(--green)" onclick="openRecurringModal(${r.id})">⟳ Create recurring slot</button>
         <button class="add-slot-btn" style="margin-top:6px" onclick="openCopyModal(${r.id})">⧉ Copy slots to other rooms…</button>`;
 
     } else {
@@ -4188,7 +4190,7 @@ function applyUpdate() {
           <input class="modal-time" type="time" id="rec_end" value="10:00">
         </div>
         <div class="modal-divider"></div>
-        <button class="modal-save-btn" onclick="saveRecurringFromModal()">Apply to today & tomorrow</button>
+        <button class="modal-save-btn" onclick="saveRecurringFromModal()">Create recurring</button>
         <button class="modal-cancel-btn" onclick="closeRecurringModal()">Cancel</button>
       </div>
     </div>
