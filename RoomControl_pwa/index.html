@@ -432,14 +432,14 @@
     </div>
     <div class="settings-section">
       <div class="settings-title">WhatsApp reminder message</div>
-      <div class="settings-sub" style="padding:0 14px 8px">Used by every slot's WhatsApp reminder button (manual or imported). Available placeholders: <code>{NAME}</code> <code>{ROOM}</code> <code>{DATE}</code> <code>{START}</code> <code>{END}</code> <code>{CODE}</code>. Your contact info from Settings → About is always added on afterward — no placeholder needed.</div>
+      <div class="settings-sub" style="padding:0 14px 8px">Used by every slot's WhatsApp reminder button (manual or imported). Available placeholders: <code>{PROFILE}</code> <code>{NAME}</code> <code>{ROOM}</code> <code>{DATE}</code> <code>{START}</code> <code>{END}</code> <code>{CODE}</code>. Wrap the code in <code>```</code> to show it as a bold monospace block on WhatsApp. Your contact info from Settings → About is always added on afterward — no placeholder needed.</div>
       <div class="settings-row" style="flex-direction:column;align-items:stretch;gap:6px">
         <div class="settings-label">Default country code</div>
         <input class="settings-input" id="cfg-whatsapp-country-code" placeholder="91" style="max-width:120px">
         <div class="settings-sub" style="padding:0">Added automatically when a saved number doesn't start with "+" — e.g. a plain 10-digit local number. Leave the country out of the phone field itself; type "+" there only if a booking's number is from a different country.</div>
       </div>
       <div class="settings-row" style="flex-direction:column;align-items:stretch;gap:6px">
-        <textarea class="settings-input" id="cfg-whatsapp-template" rows="3" style="font-family:inherit" placeholder="Hi {NAME}, your booking for {ROOM} on {DATE} from {START} to {END} is confirmed. Your access code: {CODE}"></textarea>
+        <textarea class="settings-input" id="cfg-whatsapp-template" rows="5" style="font-family:inherit" placeholder="Hi {NAME}, your booking for {PROFILE} - {ROOM} on {DATE} from {START} to {END} is confirmed."></textarea>
       </div>
     </div>
     <div class="settings-section">
@@ -975,7 +975,11 @@ function buildWhatsAppNumber(raw, countryCode) {
 // {NAME}/{ROOM}/{DATE}/{START}/{END}/{CODE} get filled in with the actual
 // slot's details. Shared by both manual slot creation and booking import,
 // so there's exactly one message format to configure, not two.
-const DEFAULT_WHATSAPP_TEMPLATE = 'Hi {NAME}, your booking for {ROOM} on {DATE} from {START} to {END} is confirmed. Your access code: {CODE}';
+// {PROFILE}/{NAME}/{ROOM}/{DATE}/{START}/{END}/{CODE} get filled with the
+// slot's details. The code is wrapped in ``` so WhatsApp renders it as a
+// prominent monospace block (WhatsApp has no font-size control, so monospace
+// is the way to make the code stand out).
+const DEFAULT_WHATSAPP_TEMPLATE = 'Hi {NAME}, your booking for {PROFILE} - {ROOM} on {DATE} from {START} to {END} is confirmed.\n\nYour activation code:\n```{CODE}```\n\nActivate with Lights On and enjoy your game.';
 
 function fillWhatsAppTemplate(template, data) {
   return (template || '').replace(/\{([A-Z_]+)\}/g, (match, key) => {
@@ -994,7 +998,7 @@ function sendSlotWhatsAppReminder(roomId, slotIdx) {
   const digits = buildWhatsAppNumber(slot.phone, p.whatsappCountryCode);
   if (!digits) { showToast('⚠️ No valid phone number'); return; }
   const bookingText = fillWhatsAppTemplate(p.whatsappTemplate || DEFAULT_WHATSAPP_TEMPLATE, {
-    NAME: slot.bookedBy || '', ROOM: r.name, DATE: slot.date || todayStr(),
+    PROFILE: p.name || '', NAME: slot.bookedBy || '', ROOM: r.name, DATE: slot.date || todayStr(),
     START: slot.s, END: slot.e, CODE: slot.code || ''
   });
   // Always appended on top of whatever the template produced — not a
