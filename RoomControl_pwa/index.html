@@ -470,6 +470,14 @@
         <div class="settings-label">Warn minutes before slot end<div class="settings-sub">Blank or 0 disables the warning entirely</div></div>
         <input class="settings-input" id="cfg-warn-minutes" type="number" min="0" max="60" placeholder="e.g. 1" style="font-family:monospace;max-width:120px">
       </div>
+      <div class="settings-row" style="flex-direction:column;align-items:stretch;gap:6px">
+        <div class="settings-label">Beep duration per beep (ms)<div class="settings-sub">On-time of each beep. Blank = 250 (0.25 sec)</div></div>
+        <input class="settings-input" id="cfg-beep-ms" type="number" min="50" max="30000" placeholder="e.g. 250" style="font-family:monospace;max-width:120px">
+      </div>
+      <div class="settings-row" style="flex-direction:column;align-items:stretch;gap:6px">
+        <div class="settings-label">Beep count<div class="settings-sub">Number of beeps (150ms gap between them). 1 = single beep. Blank = 1</div></div>
+        <input class="settings-input" id="cfg-beep-count" type="number" min="1" max="20" placeholder="e.g. 1" style="font-family:monospace;max-width:120px">
+      </div>
     </div>
     <div class="admin-code-box">
       <div class="admin-code-lbl">Today's admin code</div>
@@ -3489,6 +3497,8 @@ function renderSettings() {
   document.getElementById('cfg-emergency-pin').value = (p.emergencyPin === null || p.emergencyPin === undefined) ? '' : p.emergencyPin;
   document.getElementById('cfg-beeper-pin').value = (p.beeperPin === null || p.beeperPin === undefined) ? '' : p.beeperPin;
   document.getElementById('cfg-warn-minutes').value = (p.warnMinutes === null || p.warnMinutes === undefined) ? '' : p.warnMinutes;
+  document.getElementById('cfg-beep-ms').value = (p.beepMs === null || p.beepMs === undefined) ? '' : p.beepMs;
+  document.getElementById('cfg-beep-count').value = (p.beepCount === null || p.beepCount === undefined) ? '' : p.beepCount;
   // QR generated only when user taps Show QR button
   document.getElementById('roomNameInputs').innerHTML = state.rooms.map(renderRoomSettingsRow).join('');
   renderLicenseStatus();
@@ -3671,6 +3681,12 @@ async function saveActiveProfile() {
   // so Firebase clears it and the ESP32 reads it back as "off".
   const warnMinutesVal = parseInt(document.getElementById('cfg-warn-minutes').value.trim(), 10);
   p.warnMinutes = (isNaN(warnMinutesVal) || warnMinutesVal <= 0) ? null : warnMinutesVal;
+  // Beep per-beep duration (ms) and beep count. Blank/invalid → null so the
+  // ESP32 uses its defaults (250ms per beep, 1 beep). Count clamped to >=1.
+  const beepMsVal = parseInt(document.getElementById('cfg-beep-ms').value.trim(), 10);
+  p.beepMs = (isNaN(beepMsVal) || beepMsVal <= 0) ? null : beepMsVal;
+  const beepCountVal = parseInt(document.getElementById('cfg-beep-count').value.trim(), 10);
+  p.beepCount = (isNaN(beepCountVal) || beepCountVal < 1) ? null : beepCountVal;
   applyRoomNameEdits();
   const pinConflict = checkPinConflicts();
   if (pinConflict) {
@@ -3755,6 +3771,8 @@ function finishSaveSettings(p, message) {
     fbSet('/config/emergencyPin', p.emergencyPin === null || p.emergencyPin === undefined ? null : p.emergencyPin, p);
     fbSet('/config/beeperPin', p.beeperPin === null || p.beeperPin === undefined ? null : p.beeperPin, p);
     fbSet('/config/warnMinutes', p.warnMinutes === null || p.warnMinutes === undefined ? null : p.warnMinutes, p);
+    fbSet('/config/beepMs', p.beepMs === null || p.beepMs === undefined ? null : p.beepMs, p);
+    fbSet('/config/beepCount', p.beepCount === null || p.beepCount === undefined ? null : p.beepCount, p);
     pushAllRooms(p);
     startFbListener();
   }

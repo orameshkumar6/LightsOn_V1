@@ -163,9 +163,14 @@ const unsigned long HEARTBEAT         = 300000; // heartbeat every 5 min
 
 // ── End-of-slot warning timing (non-blocking) ────────────────
 const unsigned long LED_BLINK_INTERVAL = 100;  // LED toggle period during a warning window (faster blink)
-const unsigned long BEEP_ON_MS         = 5000; // beep on-time — 5s pulse for a bell driven via relay
-const unsigned long BEEP_GAP_MS        = 150;  // silence between beeps in the burst
-const int           BEEP_BURST_COUNT   = 1;    // single beep at window start — one-shot, never continuous
+const unsigned long BEEP_GAP_MS        = 150;  // silence between beeps in a multi-beep burst (fixed)
+
+// Beep pattern — configurable from the PWA Settings page, read from
+// /config/beepMs and /config/beepCount at boot (reboot to apply). Defaults:
+// beepOnMs = on-time of EACH beep (250ms = 0.25s); beepBurstCount = number of
+// beeps (1 = single beep). Multiple beeps are separated by BEEP_GAP_MS.
+unsigned long beepOnMs       = 250;
+int           beepBurstCount = 1;
 unsigned long lastLedBlinkToggle = 0;
 // One-shot beeper burst, driven non-blocking from loop() so it never stalls
 // polling. beepsRemaining>0 means a burst is in progress; beepPhaseUntil is
@@ -532,6 +537,22 @@ void applyWarnMinutesConfig() {
     warnMinutes = m;
     Serial.printf("End-of-slot warning: %d min before end\n", warnMinutes);
   }
+}
+
+// ── Beep pattern (per-beep duration + count) — read once at boot ─────
+// /config/beepMs = on-time of each beep (ms), /config/beepCount = number of
+// beeps. Missing/invalid → sensible defaults (250ms, 1 beep). Values are
+// clamped so a bad config can't produce a 0ms beep or a negative count.
+void applyBeepConfig() {
+  String msVal = fbGet("/config/beepMs");
+  long ms = msVal.toInt();
+  beepOnMs = (msVal == "" || msVal == "null" || msVal == "error" || ms <= 0) ? 250 : (unsigned long)ms;
+
+  String cntVal = fbGet("/config/beepCount");
+  int cnt = cntVal.toInt();
+  beepBurstCount = (cntVal == "" || cntVal == "null" || cntVal == "error" || cnt < 1) ? 1 : cnt;
+
+  Serial.printf("Beep pattern: %lu ms x %d\n", beepOnMs, beepBurstCount);
 }
 
 // Recomputed after every room state change (called from setRelay(), the
@@ -1082,9 +1103,9 @@ bool inWarningWindow(int idx) {
 void startBeepBurst() {
   if (beeperPin < 0) return;
   if (beepsRemaining > 0) return; // a ring is already sounding — don't re-arm it
-  beepsRemaining = BEEP_BURST_COUNT;
+  beepsRemaining = (beepBurstCount > 0) ? beepBurstCount : 1;
   beepOnPhase    = true;
-  beepPhaseUntil = millis() + BEEP_ON_MS;
+  beepPhaseUntil = millis() + beepOnMs;
   digitalWrite(beeperPin, BEEPER_ON);
 }
 
@@ -1103,7 +1124,7 @@ void serviceBeeper() {
     // Gap over → start the next beep
     digitalWrite(beeperPin, BEEPER_ON);
     beepOnPhase    = true;
-    beepPhaseUntil = millis() + BEEP_ON_MS;
+    beepPhaseUntil = millis() + beepOnMs;
   }
 }
 
@@ -1381,6 +1402,7 @@ void setup() {
   applyEmergencyPinConfig(); // same — emergencyPin must be known before pinMode() below
   applyBeeperPinConfig();    // shared end-of-slot beeper pin (off/PIN_NONE if unconfigured)
   applyWarnMinutesConfig();  // warn window in minutes (0 = feature disabled)
+  applyBeepConfig();         // per-beep duration + count (defaults 250ms, 1)
 
   // Configure pins now that we know which GPIOs each room actually uses
   for (int i = 0; i < roomCount; i++) {
