@@ -6,9 +6,9 @@
 const PRODUCT_INFO = {
   name: 'Lights On',
   tagline: 'Smart room & slot booking system',
-  phone: 'prefer whatsapp',        // shown as text / tel: link
+  phone: 'prefer email/whatsapp',        // shown as text / tel: link
   whatsapp: '919677020044',      // digits only, no "+", used in wa.me links
-  email: 'orameshkumar6@gmail.com' //, //  website: 'https://yourdomain.com'
+  email: 'lightson.srs@gmail.com' //, //  website: 'https://yourdomain.com'
 };
 
 // Plain-text one-liner — for anywhere only text is possible (WhatsApp
