@@ -39,6 +39,10 @@
     @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.35} }
     .conn-label { font-size: 12px; color: var(--muted); }
     .clock { font-size: 13px; color: var(--muted); }
+    .ctrl-status { font-size: 12px; padding: 6px 14px; text-align: center; font-weight: 500; }
+    .ctrl-status.online { background: rgba(64,192,128,0.12); color: var(--green); }
+    .ctrl-status.stale  { background: rgba(224,80,80,0.15); color: var(--red); }
+    .ctrl-status.unknown{ background: var(--card2); color: var(--muted); }
     .sync-btn { font-size: 12px; color: var(--accent); font-weight: 600; background: var(--card); border: 1px solid var(--border); border-radius: 6px; padding: 4px 9px; cursor: pointer; min-height: 30px; white-space: nowrap; }
     .sync-btn:hover { border-color: var(--accent); }
     .sync-btn:disabled { opacity: 0.5; cursor: default; }
@@ -356,6 +360,11 @@
     </div>
   </div>
 
+  <!-- Controller (ESP32 board) health — driven by /status/lastSeen heartbeat.
+       Hidden until we know a state; turns into a warning when the board hasn't
+       checked in within the stale threshold. -->
+  <div id="controllerStatus" class="ctrl-status" style="display:none"></div>
+
   <!-- Dashboard -->
   <div class="page active" id="page-dashboard">
     <div class="stats-row">
@@ -475,8 +484,8 @@
         <input class="settings-input" id="cfg-beep-ms" type="number" min="50" max="30000" placeholder="e.g. 250" style="font-family:monospace;max-width:120px">
       </div>
       <div class="settings-row" style="flex-direction:column;align-items:stretch;gap:6px">
-        <div class="settings-label">Beep count<div class="settings-sub">Number of beeps (150ms gap between them). 1 = single beep. Blank = 1</div></div>
-        <input class="settings-input" id="cfg-beep-count" type="number" min="1" max="20" placeholder="e.g. 1" style="font-family:monospace;max-width:120px">
+        <div class="settings-label">Beep count<div class="settings-sub">Number of beeps (150ms gap between them). 1 = single beep. 0 = no beep (LED still blinks). Blank = 1</div></div>
+        <input class="settings-input" id="cfg-beep-count" type="number" min="0" max="20" placeholder="e.g. 1" style="font-family:monospace;max-width:120px">
       </div>
     </div>
     <div class="admin-code-box">
@@ -3600,11 +3609,14 @@ async function switchProfile(id) {
   renderSettings();
   addLog('ok', `Switched to profile "${p.name}"`);
   showToast(`Switched to ${p.name} — connecting…`);
+  controllerLastSeenStr = null; // reset board-health for the new profile
+  const csEl = document.getElementById('controllerStatus'); if (csEl) csEl.style.display = 'none';
   if (p.dbUrl) {
     await ensureProfileNumber(p); // must resolve before the listener opens, so it reads the right /profiles/{n} path
     persist();
     startFbListener();
     checkDailySlotRefresh(p); // this profile's own slots — see function comment
+    refreshControllerStatus(); // board health for the newly-active profile
   }
 }
 
@@ -3685,8 +3697,12 @@ async function saveActiveProfile() {
   // ESP32 uses its defaults (250ms per beep, 1 beep). Count clamped to >=1.
   const beepMsVal = parseInt(document.getElementById('cfg-beep-ms').value.trim(), 10);
   p.beepMs = (isNaN(beepMsVal) || beepMsVal <= 0) ? null : beepMsVal;
-  const beepCountVal = parseInt(document.getElementById('cfg-beep-count').value.trim(), 10);
-  p.beepCount = (isNaN(beepCountVal) || beepCountVal < 1) ? null : beepCountVal;
+  // Blank → null (ESP32 uses its default of 1 beep). An explicit 0 is kept as
+  // 0 and means "no beep" (the LED still blinks) — a deliberate mute, distinct
+  // from leaving it blank. Negatives are treated as 0 (mute).
+  const beepCountRaw = document.getElementById('cfg-beep-count').value.trim();
+  const beepCountVal = parseInt(beepCountRaw, 10);
+  p.beepCount = (beepCountRaw === '' || isNaN(beepCountVal)) ? null : Math.max(0, beepCountVal);
   applyRoomNameEdits();
   const pinConflict = checkPinConflicts();
   if (pinConflict) {
@@ -3980,6 +3996,59 @@ function setConnStatus(ok) {
   lbl.textContent = ok ? 'Live' : 'Offline';
 }
 
+// ── Controller (ESP32 board) health ───────────────────────────
+// The board writes /status/lastSeen ("YYYY-MM-DD HH:MM:SS", local time) every
+// 5-minute heartbeat. If we haven't seen an update within the threshold, the
+// board is likely down (power/WiFi). NOTE: this is separate from the header's
+// Live/Offline dot, which only reflects THIS browser's link to Firebase.
+const CONTROLLER_STALE_MINUTES = 11; // > 2 missed 5-min heartbeats
+let controllerLastSeenStr = null;    // last value read from Firebase
+
+// Parse the board's "YYYY-MM-DD HH:MM:SS" (local time) into a Date, or null.
+function parseControllerTs(s) {
+  if (!s || typeof s !== 'string') return null;
+  const m = s.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})$/);
+  if (!m) return null;
+  return new Date(+m[1], +m[2]-1, +m[3], +m[4], +m[5], +m[6]);
+}
+
+// Re-render the pill from the last-read timestamp. Called on a timer so it
+// goes stale on its own even if no new value arrives.
+function renderControllerStatus() {
+  const el = document.getElementById('controllerStatus');
+  if (!el) return;
+  const p = getActiveProfile();
+  if (!p || !p.dbUrl) { el.style.display = 'none'; return; }
+  const ts = parseControllerTs(controllerLastSeenStr);
+  if (!ts) {
+    el.className = 'ctrl-status unknown';
+    el.textContent = '○ Controller status unknown — no heartbeat yet';
+    el.style.display = '';
+    return;
+  }
+  const mins = Math.floor((Date.now() - ts.getTime()) / 60000);
+  if (mins >= CONTROLLER_STALE_MINUTES) {
+    el.className = 'ctrl-status stale';
+    el.textContent = `⚠️ Controller not responding — last seen ${mins} min ago`;
+    el.style.display = '';
+  } else {
+    el.className = 'ctrl-status online';
+    el.textContent = '● Controller online';
+    el.style.display = '';
+  }
+}
+
+// Fetch the latest heartbeat for the active profile, then render.
+async function refreshControllerStatus() {
+  const p = getActiveProfile();
+  if (!p || !p.dbUrl) { renderControllerStatus(); return; }
+  try {
+    const v = await fbGet('/status/lastSeen', p);
+    controllerLastSeenStr = (typeof v === 'string') ? v : null;
+  } catch (e) { /* leave last known value; timer will re-evaluate */ }
+  renderControllerStatus();
+}
+
 // ── Navigation ────────────────────────────────────────────────
 function showPage(name, btn) {
   if (!btn) btn = document.getElementById(`nav-${name}`);
@@ -4189,6 +4258,10 @@ function bootApp() {
     if (document.getElementById('page-dashboard').classList.contains('active')) renderDashboard();
     if (document.getElementById('page-timeline').classList.contains('active'))  renderTimeline();
   }, 30000);
+  // Controller health: re-fetch the board's heartbeat every 2 min, and
+  // re-evaluate the pill every 30s so it turns stale on its own between fetches.
+  setInterval(refreshControllerStatus, 120000);
+  setInterval(renderControllerStatus, 30000);
 
   if (getActiveProfile().dbUrl) {
     startFbListener();
@@ -4196,6 +4269,7 @@ function bootApp() {
     manualSyncFromFirebase({ silent: true }); // on load: push any uncommitted (dirty) rooms,
       // then pull all Firebase data for the active profile. Stale (non-dirty) rooms are
       // never re-uploaded, so deletions made on another device stick on refresh.
+    refreshControllerStatus(); // initial board-health read
   }
   renderDashboard();
 

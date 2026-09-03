@@ -374,6 +374,12 @@ void pushStatus(int idx) {
 
 void pushAllStatus() {
   for (int i = 0; i < roomCount; i++) { pushStatus(i); warningAwareDelay(150); }
+  // Controller-level heartbeat — a single "board last seen" timestamp for the
+  // whole profile (all rooms share one ESP32, so health is board-wide, not
+  // per-room). Full "YYYY-MM-DD HH:MM:SS" local time so the PWA can compute
+  // how long ago it was and flag the controller as not responding. Written to
+  // /status/lastSeen under this profile's namespace (via fbPut's prefix).
+  fbPut("/status/lastSeen", "\"" + getDateStr() + " " + getTime() + "\"");
 }
 
 // ── Parse an integer field like "relayPin":26 — returns PIN_NONE if the
@@ -548,11 +554,17 @@ void applyBeepConfig() {
   long ms = msVal.toInt();
   beepOnMs = (msVal == "" || msVal == "null" || msVal == "error" || ms <= 0) ? 250 : (unsigned long)ms;
 
+  // Missing/null/error → default 1 beep. An explicit 0 means "no beep" (mute;
+  // the LED warning still blinks). Negatives are clamped to 0.
   String cntVal = fbGet("/config/beepCount");
-  int cnt = cntVal.toInt();
-  beepBurstCount = (cntVal == "" || cntVal == "null" || cntVal == "error" || cnt < 1) ? 1 : cnt;
+  if (cntVal == "" || cntVal == "null" || cntVal == "error") {
+    beepBurstCount = 1;
+  } else {
+    int cnt = cntVal.toInt();
+    beepBurstCount = (cnt < 0) ? 0 : cnt;
+  }
 
-  Serial.printf("Beep pattern: %lu ms x %d\n", beepOnMs, beepBurstCount);
+  Serial.printf("Beep pattern: %lu ms x %d%s\n", beepOnMs, beepBurstCount, beepBurstCount == 0 ? " (muted)" : "");
 }
 
 // Recomputed after every room state change (called from setRelay(), the
@@ -1102,8 +1114,9 @@ bool inWarningWindow(int idx) {
 // than being re-triggered/extended per room.
 void startBeepBurst() {
   if (beeperPin < 0) return;
-  if (beepsRemaining > 0) return; // a ring is already sounding — don't re-arm it
-  beepsRemaining = (beepBurstCount > 0) ? beepBurstCount : 1;
+  if (beepBurstCount <= 0) return; // count 0 = muted: no beep (LED still blinks)
+  if (beepsRemaining > 0) return;  // a ring is already sounding — don't re-arm it
+  beepsRemaining = beepBurstCount;
   beepOnPhase    = true;
   beepPhaseUntil = millis() + beepOnMs;
   digitalWrite(beeperPin, BEEPER_ON);
