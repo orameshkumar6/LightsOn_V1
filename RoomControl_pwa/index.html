@@ -665,8 +665,18 @@ function makeBlankRooms() {
     ledPin: DEFAULT_LED_PINS[i],
     expanded: false, panelTab: 'slot',
     slots: { 0: [], 1: [] },
-    recurring: { days: [], start: '09:00', end: '10:00' }
+    recurring: { days: [], start: '09:00', end: '10:00' }, // modal draft only (form scratch)
+    // Authoritative list of recurring DEFINITIONS for this room. Each is
+    // { id, s, e, days:[0..6], code, bookedBy, phone }. Day buckets (slots)
+    // are materialized FROM these on rollover — this list, not the buckets,
+    // is the source of truth for what recurs. Mirrored to /rooms/roomN/recurring.
+    recurringDefs: []
   }));
+}
+
+// Stable id for a recurring definition.
+function makeRecurDefId() {
+  return 'rd_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
 }
 const DAYS = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
 
@@ -1272,44 +1282,147 @@ function sendBookingWhatsApp() {
 
 
 
-// ── Recurring Modal ───────────────────────────────────────────
+// ── Recurring Slots management modal ──────────────────────────
+// This modal manages the room's authoritative recurring DEFINITIONS
+// (r.recurringDefs). Adding/editing/deleting here changes the definition;
+// day buckets are re-materialized from the defs so changes show immediately.
+// (Per-day delete on the dashboard removes only that day's instance and never
+// touches these definitions.)
 let recModalRoomId = null;
+let recEditingDays = [];     // weekday set currently selected in the form
+let recEditingDefId = null;  // null = adding a new def; an id = editing that def
 
 function openRecurringModal(roomId) {
   if (!requireLicense('edit a recurring schedule')) return;
   recModalRoomId = roomId;
   const r = state.rooms.find(x => x.id === roomId);
-  document.getElementById('recModalTitle').textContent = 'Create Recurring Slot — ' + r.name;
-  document.getElementById('rec_start').value = r.recurring.start || '09:00';
-  document.getElementById('rec_end').value   = r.recurring.end   || '10:00';
-  // Build day pills
-  const dayRow = document.getElementById('recDayRow');
-  dayRow.innerHTML = DAYS.map((d, i) =>
-    `<button class="day-pill${r.recurring.days.includes(i)?' active':''}"
-      onclick="toggleRecDay(${i})" id="recDay_${i}">${d}</button>`
-  ).join('');
+  if (!Array.isArray(r.recurringDefs)) r.recurringDefs = [];
+  // Migrate on first open: if this room still has recurring slots only in its
+  // buckets (a profile from before the definition store), lift them into
+  // recurringDefs now so the management list reflects them immediately and a
+  // subsequent save/rollover persists them to /recurring. Persist if harvested.
+  if (harvestRecurringDefs(r)) { markRoomDirty(roomId - 1); persist(); }
+  document.getElementById('recModalTitle').textContent = 'Recurring Slots — ' + r.name;
+  recClearForm();
+  renderRecDefList();
   document.getElementById('recurringModal').classList.add('show');
 }
 
 function closeRecurringModal() {
   document.getElementById('recurringModal').classList.remove('show');
   recModalRoomId = null;
+  recEditingDefId = null;
+  recEditingDays = [];
 }
 
 function recModalBackdropClick(e) {
   if (e.target.id === 'recurringModal') closeRecurringModal();
 }
 
-function toggleRecDay(i) {
+// Render the list of existing definitions with Edit / Delete actions.
+function renderRecDefList() {
   const r = state.rooms.find(x => x.id === recModalRoomId);
-  const idx = r.recurring.days.indexOf(i);
-  if (idx > -1) r.recurring.days.splice(idx, 1);
-  else r.recurring.days.push(i);
-  // Update button style
-  const btn = document.getElementById('recDay_' + i);
-  if (btn) btn.className = 'day-pill' + (r.recurring.days.includes(i) ? ' active' : '');
+  const el = document.getElementById('recDefList');
+  if (!r || !el) return;
+  const defs = r.recurringDefs || [];
+  if (defs.length === 0) {
+    el.innerHTML = `<div style="font-size:12px;color:var(--muted)">No recurring slots yet. Add one below.</div>`;
+    return;
+  }
+  el.innerHTML = defs.map(d => {
+    const dayTxt = (Array.isArray(d.days) && d.days.length) ? formatDaySet(d.days) : 'Daily';
+    const codeTxt = d.code ? d.code : 'Auto';
+    return `<div class="copy-slot-item" style="cursor:default">
+      <span class="copy-slot-time">${d.s} – ${d.e}</span>
+      <span class="copy-slot-tag" style="color:var(--green)">${dayTxt}</span>
+      <span style="font-size:11px;color:var(--amber);font-family:monospace">${codeTxt}</span>
+      <span style="display:flex;gap:5px;margin-left:auto">
+        <button class="slot-activate-btn" onclick="editRecurringDef('${d.id}')">Edit</button>
+        <button class="slot-del" onclick="deleteRecurringDef('${d.id}')" title="Delete this recurring slot permanently">×</button>
+      </span>
+    </div>`;
+  }).join('');
 }
 
+function rebuildRecDayPills() {
+  const dayRow = document.getElementById('recDayRow');
+  dayRow.innerHTML = DAYS.map((d, i) =>
+    `<button class="day-pill${recEditingDays.includes(i)?' active':''}"
+      onclick="toggleRecDay(${i})" id="recDay_${i}">${d}</button>`
+  ).join('');
+}
+
+function toggleRecDay(i) {
+  const idx = recEditingDays.indexOf(i);
+  if (idx > -1) recEditingDays.splice(idx, 1); else recEditingDays.push(i);
+  const btn = document.getElementById('recDay_' + i);
+  if (btn) btn.className = 'day-pill' + (recEditingDays.includes(i) ? ' active' : '');
+}
+
+function recRefreshCode() {
+  const el = document.getElementById('rec_code');
+  el.value = generate4DigitCode();
+  el.style.borderColor = 'var(--green)';
+  setTimeout(() => el.style.borderColor = '', 1000);
+}
+
+// Reset the add/edit form to "add new" mode.
+function recClearForm() {
+  recEditingDefId = null;
+  recEditingDays = [];
+  document.getElementById('recFormTitle').textContent = 'Add recurring slot';
+  document.getElementById('recSaveBtn').textContent = 'Add recurring slot';
+  document.getElementById('recCancelEditBtn').style.display = 'none';
+  document.getElementById('rec_start').value = '09:00';
+  document.getElementById('rec_end').value   = '10:00';
+  document.getElementById('rec_code').value  = '';
+  document.getElementById('rec_name').value  = '';
+  document.getElementById('rec_phone').value = '';
+  rebuildRecDayPills();
+}
+
+// Load a definition into the form for editing.
+function editRecurringDef(defId) {
+  const r = state.rooms.find(x => x.id === recModalRoomId);
+  const d = (r.recurringDefs || []).find(x => x.id === defId);
+  if (!d) return;
+  recEditingDefId = d.id;
+  recEditingDays = Array.isArray(d.days) ? [...d.days] : [];
+  document.getElementById('recFormTitle').textContent = 'Edit recurring slot';
+  document.getElementById('recSaveBtn').textContent = '✓ Save changes';
+  document.getElementById('recCancelEditBtn').style.display = '';
+  document.getElementById('rec_start').value = d.s || '09:00';
+  document.getElementById('rec_end').value   = d.e || '10:00';
+  document.getElementById('rec_code').value  = d.code || '';
+  document.getElementById('rec_name').value  = d.bookedBy || '';
+  document.getElementById('rec_phone').value = d.phone || '';
+  rebuildRecDayPills();
+}
+
+// Delete a definition permanently: remove it from recurringDefs AND purge its
+// materialized instances from today/tomorrow (matched by defId, or by time as
+// a fallback for pre-defId instances). Then push.
+async function deleteRecurringDef(defId) {
+  if (!requireLicense('delete a recurring schedule')) return;
+  const r = state.rooms.find(x => x.id === recModalRoomId);
+  const d = (r.recurringDefs || []).find(x => x.id === defId);
+  if (!d) return;
+  if (!confirm(`Delete recurring slot ${d.s}–${d.e} (${(Array.isArray(d.days)&&d.days.length)?formatDaySet(d.days):'Daily'})?\n\nThis removes it permanently, including from today and tomorrow.`)) return;
+  r.recurringDefs = r.recurringDefs.filter(x => x.id !== defId);
+  // Purge materialized instances of this def from both buckets.
+  const matches = (sl) => sl.recurring && (sl.defId === defId || (!sl.defId && sl.s === d.s && sl.e === d.e));
+  r.slots[0] = normalizeSlots(r.slots[0]).filter(sl => !matches(sl));
+  r.slots[1] = normalizeSlots(r.slots[1]).filter(sl => !matches(sl));
+  markRoomDirty(r.id - 1);
+  persist();
+  await pushRoom(r.id - 1);
+  if (recModalRoomId) { recClearForm(); renderRecDefList(); }
+  renderDashboard();
+  showToast('✓ Recurring slot deleted');
+}
+
+// Add a new definition or save edits to an existing one, then re-materialize
+// today/tomorrow from all defs so the change shows immediately.
 async function saveRecurringFromModal() {
   if (!requireLicense('edit a recurring schedule')) return;
   if (!recModalRoomId) return;
@@ -1317,11 +1430,50 @@ async function saveRecurringFromModal() {
   const s = document.getElementById('rec_start').value;
   const e = document.getElementById('rec_end').value;
   if (!s || !e || s >= e) { showToast('⚠️ Invalid time range'); return; }
-  r.recurring.start = s;
-  r.recurring.end   = e;
-  const savedId = recModalRoomId; // save before closeRecurringModal clears it
-  closeRecurringModal();
-  await applyRecurring(savedId);
+  if (recEditingDays.length === 0) { showToast('Select at least one day'); return; }
+
+  const codeInput = document.getElementById('rec_code').value.trim();
+  const code = (codeInput.length === 4 && /^[0-9]{4}$/.test(codeInput)) ? codeInput : generate4DigitCode();
+  const bookedBy = document.getElementById('rec_name').value.trim() || null;
+  const phone    = document.getElementById('rec_phone').value.trim() || null;
+  const days = [...recEditingDays].sort((a,b)=>a-b);
+
+  if (!Array.isArray(r.recurringDefs)) r.recurringDefs = [];
+  if (recEditingDefId) {
+    const d = r.recurringDefs.find(x => x.id === recEditingDefId);
+    if (d) { d.s = s; d.e = e; d.days = days; d.code = code; d.bookedBy = bookedBy; d.phone = phone; }
+  } else {
+    r.recurringDefs.push({ id: makeRecurDefId(), s, e, days, code, bookedBy, phone });
+  }
+
+  // Re-materialize today/tomorrow from the current defs so this change is
+  // reflected immediately (add shows now; edit updates the instances). Keeps
+  // one-time slots; replaces the recurring instances with fresh def-derived ones.
+  rematerializeRecurringBuckets(r);
+
+  markRoomDirty(r.id - 1);
+  persist();
+  await pushRoom(r.id - 1);
+  recClearForm();
+  renderRecDefList();
+  renderDashboard();
+  showToast(recEditingDefId ? '✓ Recurring slot updated' : '✓ Recurring slot added');
+}
+
+// Rebuild the recurring instances in today/tomorrow from r.recurringDefs
+// (matching each day's weekday), preserving all one-time slots. Used after a
+// definition add/edit so the buckets reflect the current defs without waiting
+// for the next rollover.
+function rematerializeRecurringBuckets(r) {
+  const todayWd    = new Date().getDay();
+  const tomorrowWd = (todayWd + 1) % 7;
+  const defs = Array.isArray(r.recurringDefs) ? r.recurringDefs : [];
+  const oneTimeToday    = normalizeSlots(r.slots[0]).filter(sl => !sl.recurring);
+  const oneTimeTomorrow = normalizeSlots(r.slots[1]).filter(sl => !sl.recurring);
+  const recToday = defs.filter(d => recurringRunsOnDay(d, todayWd)).map(d => materializeRecurringSlot(d, todayStr()));
+  const recTomorrow = defs.filter(d => recurringRunsOnDay(d, tomorrowWd)).map(d => materializeRecurringSlot(d, tomorrowDateStr()));
+  r.slots[0] = [...recToday, ...oneTimeToday];
+  r.slots[1] = [...recTomorrow, ...oneTimeTomorrow];
 }
 
 // ── Slot Modal ────────────────────────────────────────────────
@@ -2046,6 +2198,8 @@ function hydrate() {
         r.slots[0] = normalizeSlots(r.slots[0]);
         r.slots[1] = normalizeSlots(r.slots[1]);
       }
+      // Defensive init for rooms saved before recurringDefs existed.
+      if (!Array.isArray(r.recurringDefs)) r.recurringDefs = [];
     });
 
     if (d.log) state.log = d.log;
@@ -2391,6 +2545,8 @@ async function checkDailySlotRefresh(p) {
     const idx = parseInt(key.replace('room', ''), 10) - 1;
     if (idx < 0 || idx >= state.rooms.length) return;
     state.rooms[idx].slots[0] = normalizeSlots(data[key] && data[key].slots);
+    state.rooms[idx].slots[1] = normalizeSlots(data[key] && data[key].slotsT);
+    state.rooms[idx].recurringDefs = normalizeSlots(data[key] && data[key].recurring);
   });
   p.slotsRolloverMarker = marker;
   persist();
@@ -2471,9 +2627,12 @@ async function manualSyncFromFirebase(opts) {
       if (idx < 0 || idx >= state.rooms.length) return;
       const remote = data[key] || {};
       // Firebase is authoritative for slot structure AND activation state
-      // after the push — replace both today and tomorrow wholesale.
+      // after the push — replace today, tomorrow, and the recurring
+      // definitions wholesale. normalizeSlots also converts Firebase's
+      // object-with-numeric-keys form of the recurring list back to an array.
       state.rooms[idx].slots[0] = normalizeSlots(remote.slots);
       state.rooms[idx].slots[1] = normalizeSlots(remote.slotsT);
+      state.rooms[idx].recurringDefs = normalizeSlots(remote.recurring);
       updated++;
     });
     persist();
@@ -2645,6 +2804,32 @@ async function pushRoom(idx, profile) {
   }));
   ok = await fbPatch(roomBase, { slotsT }, p) && ok;
 
+  // Write the authoritative recurring DEFINITIONS to /rooms/roomN/recurring.
+  // These are the source of truth for what recurs; the ESP32 and PWA rollover
+  // generate day buckets from them. Written wholesale like slotsT (defs never
+  // carry live activation state). Per-index write + ghost-prune so a removed
+  // def actually disappears in Firebase (same technique as the slots prune).
+  const defs = Array.isArray(r.recurringDefs) ? r.recurringDefs : [];
+  for (let di = 0; di < defs.length; di++) {
+    const d = defs[di];
+    ok = await fbPatch(`${roomBase}/recurring/${di}`, {
+      id: d.id, s: d.s, e: d.e,
+      days: (Array.isArray(d.days) && d.days.length) ? d.days : null,
+      code: d.code || null,
+      bookedBy: d.bookedBy || null,
+      phone: d.phone || null
+    }, p) && ok;
+  }
+  const existingDefs = await fbGet(`${roomBase}/recurring`, p);
+  if (existingDefs && typeof existingDefs === 'object') {
+    for (const key of Object.keys(existingDefs)) {
+      const gi = parseInt(key, 10);
+      if (!isNaN(gi) && gi >= defs.length) {
+        ok = await fbSet(`${roomBase}/recurring/${gi}`, null, p) && ok;
+      }
+    }
+  }
+
   // Clear the dirty marker only on a fully-successful push — otherwise leave
   // it set so the next Sync retries this room. Persist so the flag survives
   // a reload (an edit made offline stays "uncommitted" until it uploads).
@@ -2681,7 +2866,57 @@ function tomorrowDateStr() {
   return dt.getFullYear()+'-'+String(dt.getMonth()+1).padStart(2,'0')+'-'+String(dt.getDate()).padStart(2,'0');
 }
 
+// Migration/harvest: if a room has recurring slots sitting in its buckets but
+// no recurringDefs yet (a profile from before the definition store existed),
+// lift those bucket recurring slots into recurringDefs so nothing is lost when
+// rollover starts generating buckets FROM the defs. Deduped by s|e|days.
+// Preserves the "no days = every day" convention (days stays absent/empty).
+// Returns true if it added any def (so the caller can mark the room dirty).
+function harvestRecurringDefs(r) {
+  if (!Array.isArray(r.recurringDefs)) r.recurringDefs = [];
+  if (r.recurringDefs.length > 0) return false; // already have defs — don't re-harvest
+  const sameDays = arr => JSON.stringify((arr || []).slice().sort());
+  const seen = new Set();
+  let added = false;
+  [...normalizeSlots(r.slots[0]), ...normalizeSlots(r.slots[1])].forEach(sl => {
+    if (!sl.recurring) return;
+    const k = sl.s + '|' + sl.e + '|' + sameDays(sl.days);
+    if (seen.has(k)) return;
+    seen.add(k);
+    r.recurringDefs.push({
+      id: makeRecurDefId(),
+      s: sl.s, e: sl.e,
+      days: Array.isArray(sl.days) ? [...sl.days] : [],
+      code: sl.code || null,
+      bookedBy: sl.bookedBy || null,
+      phone: sl.phone || null
+    });
+    added = true;
+  });
+  return added;
+}
+
+// Materialize a recurring definition into a concrete day-slot for dateStr.
+// Carries the def's stable code + booker/phone, links back via defId, and
+// resets activation (fresh instance for a new day).
+function materializeRecurringSlot(def, dateStr) {
+  return {
+    s: def.s, e: def.e,
+    recurring: true,
+    defId: def.id,
+    days: Array.isArray(def.days) ? [...def.days] : [],
+    code: def.code || null,
+    bookedBy: def.bookedBy || null,
+    phone: def.phone || null,
+    activatedAt: null, activatedBy: null,
+    attempts: 0, lockedUntil: null, expired: false,
+    _fresh: true,
+    date: dateStr
+  };
+}
+
 function rolloverRoomLocally(r) {
+  harvestRecurringDefs(r); // one-time lift of legacy bucket recurring slots into defs
   const todaySlots    = normalizeSlots(r.slots[0]);
   const tomorrowSlots = normalizeSlots(r.slots[1]);
   const resetFields = { activatedAt: null, activatedBy: null, attempts: 0, lockedUntil: null, expired: false, _fresh: true };
@@ -2689,43 +2924,29 @@ function rolloverRoomLocally(r) {
   const tomorrowDate = tomorrowDateStr();
   const newTodayWd    = new Date().getDay();   // rollover runs on the new day
   const newTomorrowWd = (newTodayWd + 1) % 7;
-
-  // ── Recurring definitions ──────────────────────────────────
-  // The set of distinct recurring slots (by start/end/days) currently held in
-  // either bucket IS the source of truth for regeneration. Dedup so a def that
-  // exists in both today and tomorrow is only regenerated once.
-  const sameDays = arr => JSON.stringify((arr || []).slice().sort());
-  const defKey = sl => sl.s + '|' + sl.e + '|' + sameDays(sl.days);
-  const recurringDefs = [];
-  const seen = new Set();
-  [...todaySlots, ...tomorrowSlots].forEach(sl => {
-    if (!sl.recurring) return;
-    const k = defKey(sl);
-    if (seen.has(k)) return;
-    seen.add(k);
-    recurringDefs.push(sl);
-  });
+  const defs = Array.isArray(r.recurringDefs) ? r.recurringDefs : [];
 
   // ── Build new TODAY ────────────────────────────────────────
-  // 1. Promote only NON-recurring slots from tomorrow (reset activation, date→today).
-  const promoted = tomorrowSlots
-    .filter(sl => !sl.recurring)
-    .map(sl => ({ ...sl, ...resetFields, date: todayDateStr }));
+  // 1. Regenerate every recurring DEFINITION that runs on the new today's
+  //    weekday — from recurringDefs (the source of truth), NOT from buckets.
+  const regenToday = defs
+    .filter(def => recurringRunsOnDay(def, newTodayWd))
+    .map(def => materializeRecurringSlot(def, todayDateStr));
   // 2. Keep today's own one-time slots that are genuinely still today
   //    (created after an earlier rollover today) — untouched, activation kept.
   const keptOneTimeToday = todaySlots.filter(sl => !sl.recurring && sl.date === todayDateStr);
-  // 3. Regenerate every recurring def that runs on the NEW today's weekday.
-  const regenToday = recurringDefs
-    .filter(def => recurringRunsOnDay(def, newTodayWd))
-    .map(def => ({ ...def, ...resetFields, date: todayDateStr }));
+  // 3. Promote only NON-recurring slots from tomorrow (reset activation, date→today).
+  const promoted = tomorrowSlots
+    .filter(sl => !sl.recurring)
+    .map(sl => ({ ...sl, ...resetFields, date: todayDateStr }));
 
   r.slots[0] = [...regenToday, ...keptOneTimeToday, ...promoted];
 
   // ── Build new TOMORROW ─────────────────────────────────────
-  // Only recurring defs that run on tomorrow's weekday (fresh, activation reset).
-  r.slots[1] = recurringDefs
+  // Only recurring defs that run on tomorrow's weekday (from defs).
+  r.slots[1] = defs
     .filter(def => recurringRunsOnDay(def, newTomorrowWd))
-    .map(def => ({ ...def, ...resetFields, date: tomorrowDate }));
+    .map(def => materializeRecurringSlot(def, tomorrowDate));
 }
 
 // Days since the Unix epoch, counted by LOCAL calendar date — matches
@@ -2906,59 +3127,9 @@ function setRecurring(id, field, val) {
   state.rooms.find(r => r.id === id).recurring[field] = val;
 }
 
-async function applyRecurring(id) {
-  const r = state.rooms.find(x => x.id === id);
-  if (!r.recurring.days.length) { showToast('Select at least one day'); return; }
-  if (!r.recurring.start || !r.recurring.end || r.recurring.start >= r.recurring.end) {
-    showToast('⚠️ Invalid time range'); return;
-  }
-  // Materialize the recurring slot into the TODAY and/or TOMORROW buckets,
-  // but only into a bucket whose weekday is one of the selected days. Since
-  // the dashboard shows Today and Tomorrow, this makes the slot appear
-  // immediately on the correct day(s) after creation — a Mon–Fri slot created
-  // on a Sunday lands in tomorrow (Mon) right away, and nothing in Sunday.
-  // Rollover then keeps regenerating it on subsequent matching days.
-  const days = [...r.recurring.days];
-  const sameDays = arr => JSON.stringify((arr || []).slice().sort());
-  const todayWd    = new Date().getDay();
-  const tomorrowWd = (todayWd + 1) % 7;
-
-  const makeSlot = (dateStr) => ({
-    s: r.recurring.start, e: r.recurring.end,
-    recurring: true, code: generate4DigitCode(),
-    days: [...days],
-    activatedAt: null, activatedBy: null,
-    attempts: 0, lockedUntil: null, expired: false,
-    _fresh: true,
-    date: dateStr
-  });
-  const tomorrowStrLocal = () => {
-    const dt = new Date(); dt.setDate(dt.getDate()+1);
-    return dt.getFullYear()+'-'+String(dt.getMonth()+1).padStart(2,'0')+'-'+String(dt.getDate()).padStart(2,'0');
-  };
-
-  let addedTo = [];
-  let anyOverlap = false;
-  [[0, todayWd, todayStr()], [1, tomorrowWd, tomorrowStrLocal()]].forEach(([bucket, wd, dateStr]) => {
-    if (!days.includes(wd)) return;                 // slot doesn't run that day → don't seed that bucket
-    if (!r.slots[bucket]) r.slots[bucket] = [];
-    const exists = r.slots[bucket].some(sl =>
-      sl.recurring && sl.s === r.recurring.start && sl.e === r.recurring.end &&
-      sameDays(sl.days) === sameDays(days));
-    if (exists) return;                             // already there → skip (dedup)
-    if (r.slots[bucket].some(sl => slotsOverlap(r.recurring.start, r.recurring.end, sl.s, sl.e))) anyOverlap = true;
-    r.slots[bucket].push(makeSlot(dateStr));
-    addedTo.push(bucket === 0 ? 'today' : 'tomorrow');
-  });
-
-  markRoomDirty(id-1);
-  persist(); await pushRoom(id-1); renderDashboard();
-  if (addedTo.length === 0) {
-    showToast('✓ Recurring saved — starts on the next ' + formatDaySet(days) + ' day');
-  } else {
-    showToast((anyOverlap ? '⚠️ Recurring saved (overlaps another slot) — ' : '✓ Recurring saved — ') + 'shows ' + addedTo.join(' & '));
-  }
-}
+// (applyRecurring removed — recurring creation now goes through the recurring
+//  management modal, which writes to r.recurringDefs and re-materializes the
+//  day buckets via rematerializeRecurringBuckets(). See saveRecurringFromModal.)
 
 async function setOverride(id, val) {
   const r = state.rooms.find(x => x.id === id);
@@ -3344,7 +3515,7 @@ function renderRoomCard(r) {
         </div>
         <div class="slot-list">${slotItems}</div>
         <button class="add-slot-btn" onclick="openSlotModal(${r.id})">+ Add slot</button>
-        <button class="add-slot-btn" style="margin-top:6px;border-color:var(--green);color:var(--green)" onclick="openRecurringModal(${r.id})">⟳ Create recurring slot</button>
+        <button class="add-slot-btn" style="margin-top:6px;border-color:var(--green);color:var(--green)" onclick="openRecurringModal(${r.id})">⟳ Manage recurring slots</button>
         <button class="add-slot-btn" style="margin-top:6px" onclick="openCopyModal(${r.id})">⧉ Copy slots to other rooms…</button>`;
 
     } else {
@@ -3816,7 +3987,8 @@ function addRoom() {
     relayPin: null, ledPin: null,
     expanded: false, panelTab: 'slot',
     slots: { 0: [], 1: [] },
-    recurring: { days: [], start: '09:00', end: '10:00' }
+    recurring: { days: [], start: '09:00', end: '10:00' },
+    recurringDefs: []
   });
   persist();
   renderDashboard();
@@ -3947,6 +4119,7 @@ function restoreFromFile(event) {
           r.slots[0] = normalizeSlots(r.slots[0]);
           r.slots[1] = normalizeSlots(r.slots[1]);
         }
+        if (!Array.isArray(r.recurringDefs)) r.recurringDefs = [];
       });
 
       // Persist and refresh
@@ -4323,12 +4496,19 @@ function applyUpdate() {
   <div class="modal-overlay" id="recurringModal" onclick="recModalBackdropClick(event)">
     <div class="modal-box">
       <div class="modal-header">
-        <span class="modal-title" id="recModalTitle">Recurring Schedule</span>
+        <span class="modal-title" id="recModalTitle">Recurring Slots</span>
         <button class="modal-close" onclick="closeRecurringModal()">×</button>
       </div>
       <div class="modal-body">
-        <p style="font-size:12px;color:var(--muted);margin-bottom:12px">Select days and time for daily recurring slot:</p>
-        <div class="day-row" id="recDayRow" style="flex-wrap:wrap;gap:6px;margin-bottom:14px"></div>
+        <!-- Existing definitions for this room -->
+        <div class="copy-title" style="margin-bottom:6px">Recurring definitions</div>
+        <div id="recDefList" class="copy-slot-list" style="margin-bottom:12px"></div>
+
+        <!-- Add / edit form -->
+        <div class="modal-divider"></div>
+        <div class="copy-title" id="recFormTitle" style="margin-bottom:6px">Add recurring slot</div>
+        <p style="font-size:12px;color:var(--muted);margin-bottom:8px">Select the days this slot repeats on, and its time:</p>
+        <div class="day-row" id="recDayRow" style="flex-wrap:wrap;gap:6px;margin-bottom:12px"></div>
         <div class="modal-row">
           <label class="modal-label" for="rec_start">Start</label>
           <input class="modal-time" type="time" id="rec_start" value="09:00">
@@ -4337,9 +4517,24 @@ function applyUpdate() {
           <label class="modal-label" for="rec_end">End</label>
           <input class="modal-time" type="time" id="rec_end" value="10:00">
         </div>
+        <div class="modal-code-row">
+          <input class="modal-code-input" type="text" id="rec_code" maxlength="4" placeholder="----"
+            oninput="this.value=this.value.replace(/[^0-9]/g,'').slice(0,4)">
+          <button class="code-refresh-btn" onclick="recRefreshCode()" title="Generate random">🔄</button>
+          <span style="font-size:11px;color:var(--muted)">Activation code (blank = auto-generate). Same code every day for this booking.</span>
+        </div>
+        <div class="modal-row">
+          <label class="modal-label" for="rec_name">Name</label>
+          <input class="settings-input" id="rec_name" placeholder="Optional — booker name (carried to every day)">
+        </div>
+        <div class="modal-row">
+          <label class="modal-label" for="rec_phone">Phone</label>
+          <input class="settings-input" id="rec_phone" placeholder="Optional — for WhatsApp reminder" style="font-family:inherit">
+        </div>
         <div class="modal-divider"></div>
-        <button class="modal-save-btn" onclick="saveRecurringFromModal()">Create recurring</button>
-        <button class="modal-cancel-btn" onclick="closeRecurringModal()">Cancel</button>
+        <button class="modal-save-btn" id="recSaveBtn" onclick="saveRecurringFromModal()">Add recurring slot</button>
+        <button class="modal-cancel-btn" id="recCancelEditBtn" onclick="recClearForm()" style="display:none">Cancel edit</button>
+        <button class="modal-cancel-btn" onclick="closeRecurringModal()">Close</button>
       </div>
     </div>
   </div>

@@ -119,6 +119,18 @@ String profileNum;
 // (and all non-recurring slots) behaving exactly as before.
 struct Slot { int sh, sm, eh, em; bool recurring; bool activated; bool expired; int daysMask; };
 
+// A recurring DEFINITION read from /rooms/roomN/recurring — the authoritative
+// source the day buckets are generated FROM during rollover. daysMask uses the
+// same bit convention as Slot (0 = every day). code/bookedBy/phone are carried
+// through into the materialized day slot so the PWA/activate page keep them.
+struct RecurDef {
+  int  sh, sm, eh, em;
+  int  daysMask;
+  char code[6];      // "" = auto-approved (no code)
+  char bookedBy[24];
+  char phone[20];
+};
+
 struct Room {
   bool lightOn   = false;
   int  ovr       = -1;       // -1=auto  0=force OFF  1=force ON
@@ -126,6 +138,8 @@ struct Room {
   int  ledPin    = PIN_NONE; // PIN_NONE = no LED configured for this room
   Slot slots[10];
   int  slotCount = 0;
+  RecurDef recurDefs[10];    // recurring definitions for this room
+  int  recurDefCount = 0;
   char name[24];
   // End-of-slot warning state (see beeperPin/warnMinutes above). warning is
   // true only while this room is inside an active slot's final warnMinutes;
@@ -416,6 +430,37 @@ int countRooms(const String &json) {
 }
 
 // ── Parse slots — into TEMP buffer, only copy if fully valid ──
+// ── Parse recurring DEFINITIONS from /rooms/roomN/recurring ──
+// Each def object: {"id","s","e","days":[..],"code","bookedBy","phone"}.
+// Stored into rooms[idx].recurDefs; these are the source of truth the
+// rollover generates day buckets from.
+void parseRecurDefs(int idx, String json) {
+  rooms[idx].recurDefCount = 0;
+  if (json == "null" || json == "" || json == "error" || json.length() < 5) return;
+  int pos = 0;
+  while (pos < (int)json.length() && rooms[idx].recurDefCount < 10) {
+    int si = json.indexOf("\"s\":\"", pos);
+    int ei = json.indexOf("\"e\":\"", pos);
+    if (si < 0 || ei < 0) break;
+    int objStart = json.lastIndexOf('{', si);
+    int objEnd   = json.indexOf('}', ei);
+    String startStr = json.substring(si + 5, si + 10);
+    String endStr   = json.substring(ei + 5, ei + 10);
+    int sh, sm, eh, em;
+    if (parseTime(startStr, sh, sm) && parseTime(endStr, eh, em) && objStart >= 0 && objEnd >= 0) {
+      String obj = json.substring(objStart, objEnd + 1);
+      RecurDef &d = rooms[idx].recurDefs[rooms[idx].recurDefCount];
+      d.sh = sh; d.sm = sm; d.eh = eh; d.em = em;
+      d.daysMask = daysMaskFromJson(obj);
+      String c  = extractStringField(obj, "code");  c.toCharArray(d.code, sizeof(d.code));
+      String bb = extractStringField(obj, "bookedBy"); bb.toCharArray(d.bookedBy, sizeof(d.bookedBy));
+      String ph = extractStringField(obj, "phone");    ph.toCharArray(d.phone, sizeof(d.phone));
+      rooms[idx].recurDefCount++;
+    }
+    pos = max(si, ei) + 10;
+  }
+}
+
 void parseSlots(int idx, String json) {
   if (json == "null" || json == "" || json == "error" || json.length() < 5) {
     rooms[idx].slotCount = 0;
@@ -642,6 +687,11 @@ void readAllRooms() {
         rooms[i].slotCount = 0;
       }
     }
+
+    // Recurring definitions — the authoritative source rollover generates
+    // day buckets from. Fetched directly (not embedded in the /rooms blob).
+    String recJson = fbGet("/rooms/room" + String(i + 1) + "/recurring");
+    parseRecurDefs(i, recJson);
   }
 }
 
@@ -838,6 +888,23 @@ String buildRecurringSlotJson(int roomIdx, int j, const String &base, const Stri
     codeField + bookedByField + phoneField + daysField + ",\"date\":\"" + dateStr + "\",\"activatedAt\":null}";
 }
 
+// Materialize a recurring DEFINITION (rooms[roomIdx].recurDefs[k]) into a
+// day-slot JSON object dated dateStr. Carries the def's stable code + booker/
+// phone + days, activation reset. This is the def-driven replacement for
+// buildRecurringSlotJson during rollover.
+String buildDefSlotJson(int roomIdx, int k, const String &dateStr) {
+  RecurDef &d = rooms[roomIdx].recurDefs[k];
+  char s[6], e[6];
+  snprintf(s, 6, "%02d:%02d", d.sh, d.sm);
+  snprintf(e, 6, "%02d:%02d", d.eh, d.em);
+  String codeField = (strlen(d.code) > 0)     ? (",\"code\":\"" + String(d.code) + "\"") : "";
+  String bbField   = (strlen(d.bookedBy) > 0) ? (",\"bookedBy\":\"" + String(d.bookedBy) + "\"") : "";
+  String phField   = (strlen(d.phone) > 0)    ? (",\"phone\":\"" + String(d.phone) + "\"") : "";
+  String daysField = daysFieldFromMask(d.daysMask);
+  return "{\"s\":\"" + String(s) + "\",\"e\":\"" + String(e) + "\",\"recurring\":true" +
+    codeField + bbField + phField + daysField + ",\"date\":\"" + dateStr + "\",\"activatedAt\":null}";
+}
+
 // today) — a slot created for today AFTER that first run must not be
 // treated the same as leftover junk from a previous day just because
 // both happen to sit in the same "today" bucket.
@@ -860,28 +927,17 @@ bool midnightRollover() {
     String newTodayJson = "[";
     bool first = true;
 
-    // Regenerate recurring slots that run on the NEW today's weekday. A
-    // recurring slot whose daysMask excludes today is simply not emitted into
-    // today (it will be emitted into slotsT below if it matches tomorrow, and
-    // regenerated into today on whatever future day it matches). daysMask 0 =
-    // every day. Activation reset, date stamped to today.
+    // Regenerate today's recurring slots FROM the recurring DEFINITIONS
+    // (/rooms/roomN/recurring), not from whatever is in the buckets. A def
+    // whose daysMask excludes today is simply not emitted into today. daysMask
+    // 0 = every day. Stable code + booker/phone carried, activation reset.
     int todayWd = nowWeekday();
-    String seenToday = ""; // dedup keys for today's recurring set
-    for (int j = 0; j < rooms[i].slotCount; j++) {
-      if (!rooms[i].slots[j].recurring) continue;
-      if (!maskRunsOnDay(rooms[i].slots[j].daysMask, todayWd)) continue;
-      char sb[6], eb[6];
-      snprintf(sb, 6, "%02d:%02d", rooms[i].slots[j].sh, rooms[i].slots[j].sm);
-      snprintf(eb, 6, "%02d:%02d", rooms[i].slots[j].eh, rooms[i].slots[j].em);
-      seenToday += "|" + String(sb) + "|" + String(eb) + "|" + String(rooms[i].slots[j].daysMask) + "|";
+    for (int k = 0; k < rooms[i].recurDefCount; k++) {
+      if (!maskRunsOnDay(rooms[i].recurDefs[k].daysMask, todayWd)) continue;
       if (!first) newTodayJson += ",";
-      newTodayJson += buildRecurringSlotJson(i, j, base, getDateStr());
+      newTodayJson += buildDefSlotJson(i, k, getDateStr());
       first = false;
     }
-    // Fold in recurring defs that live only in tomorrow's slotsT (e.g. a
-    // weekday slot created on an off day, seeded by the PWA into tomorrow
-    // only) and that also match today's weekday — deduped against seenToday.
-    appendRecurringFromJson(tomorrowJson, todayWd, getDateStr(), newTodayJson, first, seenToday);
 
     // Keep today's one-time slots whose OWN date is still actually
     // today — created after an earlier rollover already ran today (or
@@ -949,22 +1005,13 @@ bool midnightRollover() {
     String tomorrowDate = getTomorrowDateStr();
     String newTomorrowJson = "[";
     bool tfirst = true;
-    String seenTomorrow = "";
-    for (int j = 0; j < rooms[i].slotCount; j++) {
-      if (!rooms[i].slots[j].recurring) continue;
-      if (!maskRunsOnDay(rooms[i].slots[j].daysMask, tomorrowWd)) continue;
-      char sb[6], eb[6];
-      snprintf(sb, 6, "%02d:%02d", rooms[i].slots[j].sh, rooms[i].slots[j].sm);
-      snprintf(eb, 6, "%02d:%02d", rooms[i].slots[j].eh, rooms[i].slots[j].em);
-      seenTomorrow += "|" + String(sb) + "|" + String(eb) + "|" + String(rooms[i].slots[j].daysMask) + "|";
+    // Tomorrow's recurring slots, also generated FROM the definitions.
+    for (int k = 0; k < rooms[i].recurDefCount; k++) {
+      if (!maskRunsOnDay(rooms[i].recurDefs[k].daysMask, tomorrowWd)) continue;
       if (!tfirst) newTomorrowJson += ",";
-      newTomorrowJson += buildRecurringSlotJson(i, j, base, tomorrowDate);
+      newTomorrowJson += buildDefSlotJson(i, k, tomorrowDate);
       tfirst = false;
     }
-    // Fold in recurring defs present only in the old slotsT that match
-    // tomorrow's weekday (deduped) — so a recurring def never silently
-    // disappears just because it wasn't in today's parsed set.
-    appendRecurringFromJson(tomorrowJson, tomorrowWd, tomorrowDate, newTomorrowJson, tfirst, seenTomorrow);
     newTomorrowJson += "]";
 
     bool ok1 = fbPut(base + "/slots",  newTodayJson);
