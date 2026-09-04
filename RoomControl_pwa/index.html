@@ -314,6 +314,20 @@
     body.license-locked .slot-del {
       opacity: 0.45; pointer-events: none;
     }
+
+    /* ── Admin mode — when OFF (default), hide advanced Settings ─────────
+       Only sections tagged .admin-exempt (Admin-mode toggle, End-of-slot
+       warning [beep], Today's admin code, About) stay visible; everything
+       else on the Settings page is hidden. .admin-only marks individual rows
+       within an otherwise-exempt section that should still hide (the beeper
+       pin + warn-minutes rows inside the End-of-slot warning section). */
+    body:not(.admin-mode) #page-settings > .settings-section:not(.admin-exempt),
+    body:not(.admin-mode) #page-settings > .qr-section,
+    body:not(.admin-mode) #page-settings > .save-btn,
+    body:not(.admin-mode) #page-settings > .test-btn,
+    body:not(.admin-mode) #page-settings .admin-only {
+      display: none !important;
+    }
     /* ── No active license — full app block ───────────────────── */
     .license-expired-blocker { position: fixed; inset: 0; z-index: 9999;
       background: var(--bg); display: none; align-items: center; justify-content: center;
@@ -404,6 +418,16 @@
   <!-- Settings -->
   <div class="page" id="page-settings">
     <div class="fb-badge">🔥 Firebase Realtime Database</div>
+    <!-- Admin mode toggle — per-device (localStorage). When off, advanced
+         setup sections are hidden, leaving only beep settings, today's admin
+         code, and About. Always visible (admin-exempt). -->
+    <div class="settings-section admin-exempt">
+      <div class="settings-title">Admin mode</div>
+      <div class="settings-row">
+        <div class="settings-label">Show advanced setup<div class="settings-sub">Firebase, pins, license, profiles, relay wiring, etc. Off = simplified view</div></div>
+        <input type="checkbox" id="cfg-admin-mode" onchange="toggleAdminMode(this.checked)" style="width:20px;height:20px;accent-color:var(--accent)">
+      </div>
+    </div>
     <div class="settings-section">
       <div class="settings-title">Profiles</div>
       <div id="profileList"></div>
@@ -468,14 +492,14 @@
         <input class="settings-input" id="cfg-emergency-pin" type="number" min="0" max="39" placeholder="e.g. 33" style="font-family:monospace;max-width:120px">
       </div>
     </div>
-    <div class="settings-section">
+    <div class="settings-section admin-exempt">
       <div class="settings-title">End-of-slot warning</div>
-      <div class="settings-sub" style="padding:0 14px 8px">A single shared beeper sounds one short beep when any room's active slot is a few minutes from ending, and that room's own LED starts blinking for the rest of the window. Leave both blank to disable — existing setups are unaffected. Applied to this profile's Firebase; the ESP32 needs a reboot to pick up a pin change.</div>
-      <div class="settings-row" style="flex-direction:column;align-items:stretch;gap:6px">
+      <div class="settings-sub admin-only" style="padding:0 14px 8px">A single shared beeper sounds one short beep when any room's active slot is a few minutes from ending, and that room's own LED starts blinking for the rest of the window. Leave both blank to disable — existing setups are unaffected. Applied to this profile's Firebase; the ESP32 needs a reboot to pick up a pin change.</div>
+      <div class="settings-row admin-only" style="flex-direction:column;align-items:stretch;gap:6px">
         <div class="settings-label">Warning beeper GPIO pin<div class="settings-sub">Shared for the whole controller. Leave blank if not wired</div></div>
         <input class="settings-input" id="cfg-beeper-pin" type="number" min="0" max="39" placeholder="e.g. 25" style="font-family:monospace;max-width:120px">
       </div>
-      <div class="settings-row" style="flex-direction:column;align-items:stretch;gap:6px">
+      <div class="settings-row admin-only" style="flex-direction:column;align-items:stretch;gap:6px">
         <div class="settings-label">Warn minutes before slot end<div class="settings-sub">Blank or 0 disables the warning entirely</div></div>
         <input class="settings-input" id="cfg-warn-minutes" type="number" min="0" max="60" placeholder="e.g. 1" style="font-family:monospace;max-width:120px">
       </div>
@@ -538,7 +562,7 @@
       </div>
       <div id="backupRestoreMsg" class="status-msg" style="display:none;margin:8px 14px 0"></div>
     </div>
-    <div class="settings-section license-exempt">
+    <div class="settings-section license-exempt admin-exempt">
       <div class="settings-title">About</div>
       <div class="settings-row" style="flex-direction:column;align-items:stretch;gap:6px;font-size:13px;color:var(--muted)" id="aboutProductInfo"></div>
     </div>
@@ -4276,6 +4300,22 @@ function requireCapacity(kind, currentCount, actionLabel) {
   return false;
 }
 
+// ── Admin mode (per-device UI preference) ─────────────────────
+// Off (default) hides the advanced setup sections on the Settings page via
+// the body:not(.admin-mode) CSS rules, leaving beep settings, today's admin
+// code, and About. Stored in localStorage — a device-local view preference,
+// not a security control and not synced.
+function applyAdminMode() {
+  const on = localStorage.getItem('rc_admin_mode') === '1';
+  document.body.classList.toggle('admin-mode', on);
+  const cb = document.getElementById('cfg-admin-mode');
+  if (cb) cb.checked = on;
+}
+function toggleAdminMode(on) {
+  localStorage.setItem('rc_admin_mode', on ? '1' : '0');
+  document.body.classList.toggle('admin-mode', on);
+}
+
 function applyLicenseUIState() {
   document.body.classList.toggle('license-locked', !licenseValid);
   const banner = document.getElementById('licenseBanner');
@@ -4393,6 +4433,7 @@ startLicenseWatch();
 
 function bootApp() {
   _appBooted = true;
+  applyAdminMode(); // restore per-device admin-mode view preference
   document.getElementById('appTitle').textContent = PRODUCT_INFO.name;
   document.title = PRODUCT_INFO.name;
   document.getElementById('aboutProductInfo').innerHTML = productInfoHtml();
