@@ -2251,7 +2251,22 @@ async function ensureProfileNumber(p) {
 // the EXPLICIT profile passed in, not the implicit active-profile helpers,
 // since renaming can target a profile that isn't currently active.
 async function pushProfileName(p) {
-  if (!p.dbUrl || !p.fbNum) return;
+  if (!p.dbUrl) return;
+  // If this profile has never been allocated a /profiles/{n} slot, its name
+  // was never written to Firebase, so a rename would silently no-op (the old
+  // symptom: activation page keeps showing the original name). Allocate the
+  // number now so the push has a target — but only when `p` is the ACTIVE
+  // profile, since ensureProfileNumber()'s fbGet/fbSet resolve against the
+  // active profile. For a non-active profile we can't safely allocate here,
+  // so we fall through and skip (its name will be pushed when it's next
+  // switched to / saved, exactly as before — no behaviour change there).
+  if (!p.fbNum) {
+    const active = getActiveProfile();
+    if (active && active.id === p.id) {
+      try { await ensureProfileNumber(p); } catch(e) {}
+    }
+    if (!p.fbNum) return; // still unallocated (non-active or allocation failed)
+  }
   try {
     await fetch(`${p.dbUrl}/profiles/${p.fbNum}/name.json`, {
       method: 'PUT',
