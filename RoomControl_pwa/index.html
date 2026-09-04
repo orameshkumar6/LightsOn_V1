@@ -238,7 +238,7 @@
     .update-banner { position: fixed; top: 0; left: 0; right: 0; background: var(--accent); color: white; padding: 10px 16px; display: flex; align-items: center; justify-content: space-between; font-size: 13px; z-index: 300; transform: translateY(-100%); transition: transform 0.3s; }
     .update-banner.show { transform: translateY(0); }
     .update-btn { background: white; color: var(--accent); border: none; border-radius: 6px; padding: 4px 12px; font-size: 12px; font-weight: 600; cursor: pointer; }
-    .toast { position: fixed; bottom: 90px; left: 50%; transform: translateX(-50%); background: var(--card); border: 1px solid var(--border); border-radius: 20px; padding: 8px 18px; font-size: 13px; opacity: 0; transition: opacity 0.3s; pointer-events: none; white-space: nowrap; z-index: 200; }
+    .toast { position: fixed; bottom: 90px; left: 50%; transform: translateX(-50%); background: var(--card); border: 1px solid var(--border); border-radius: 20px; padding: 8px 18px; font-size: 13px; opacity: 0; transition: opacity 0.3s; pointer-events: none; white-space: nowrap; z-index: 400; }
     .toast.show { opacity: 1; }
 
     .toggle { position: relative; width: 40px; height: 22px; }
@@ -1602,7 +1602,6 @@ function openSlotModal(roomId) {
   document.getElementById('m_name').value     = '';
   document.getElementById('m_phone').value    = '';
   document.getElementById('m_reqcode').checked  = true;
-  document.getElementById('m_recurring').checked = false;
   document.getElementById('m_coderow').style.opacity = '1';
   document.getElementById('m_coderow').style.pointerEvents = '';
   // Day-view time picker — built once, then just re-synced on every open
@@ -1613,8 +1612,6 @@ function openSlotModal(roomId) {
   syncGridFromModalTimes(); // highlights the 09:00–10:00 default
   // Day buttons
   setModalDay(state.schedDay);
-  // Recurring disabled for tomorrow
-  modalToggleRecurring(false);
   document.getElementById('slotModal').classList.add('show');
 }
 
@@ -1641,19 +1638,14 @@ function openSlotModalEdit(roomId, slotIdx) {
   document.getElementById('m_phone').value    = slot.phone || '';
   const hasCode = !!slot.code;
   document.getElementById('m_reqcode').checked = hasCode;
-  document.getElementById('m_recurring').checked = !!slot.recurring;
   document.getElementById('m_coderow').style.opacity = hasCode ? '1' : '0.3';
   document.getElementById('m_coderow').style.pointerEvents = hasCode ? '' : 'none';
   if (!modalGridBuilt) {
     document.getElementById('modalTimeGrid').innerHTML = buildTimeGridHtml();
     modalGridBuilt = true;
   }
-  // setModalDay() re-enables/labels the recurring checkbox for the current
-  // day, so re-apply the slot's recurring state afterwards for today's slots.
   setModalDay(state.schedDay);
-  if (state.schedDay === 0) document.getElementById('m_recurring').checked = !!slot.recurring;
   syncGridFromModalTimes(); // highlight the slot's range on the grid
-  modalToggleRecurring(false);
   document.getElementById('slotModal').classList.add('show');
 }
 
@@ -1671,20 +1663,6 @@ function setModalDay(d) {
   modalDay = d;
   document.getElementById('mdayBtn0').className = 'modal-day-btn' + (d===0?' active':'');
   document.getElementById('mdayBtn1').className = 'modal-day-btn' + (d===1?' active':'');
-  // Disable recurring for tomorrow
-  const rec = document.getElementById('m_recurring');
-  const lbl = document.getElementById('m_recurlabel');
-  if (d === 1) {
-    rec.checked = false;
-    rec.disabled = true;
-    lbl.textContent = 'Recurring (today only)';
-    lbl.style.color = 'var(--muted)';
-    lbl.style.opacity = '0.5';
-  } else {
-    rec.disabled = false;
-    lbl.textContent = 'Repeat daily (recurring)';
-    lbl.style.opacity = '1';
-  }
   renderGridOccupancy(); // today/tomorrow have different existing slots
 }
 
@@ -1694,8 +1672,6 @@ function modalToggleCode(checked) {
   row.style.pointerEvents = checked ? '' : 'none';
   if (!checked) document.getElementById('m_code').value = '';
 }
-
-function modalToggleRecurring(checked) {}
 
 function modalRefreshCode() {
   const el = document.getElementById('m_code');
@@ -1767,7 +1743,7 @@ async function saveSlotFromModal() {
   const slotCode     = requireCode
     ? (codeInput.length === 4 && /^[0-9]{4}$/.test(codeInput) ? codeInput : generate4DigitCode())
     : null;
-  const recurring    = document.getElementById('m_recurring').checked && modalDay === 0;
+  const recurring    = false; // add-slot creates one-time slots only; recurring is managed separately
   const bookedBy     = document.getElementById('m_name').value.trim() || null;
   const phone        = document.getElementById('m_phone').value.trim() || null;
 
@@ -4593,10 +4569,7 @@ function applyUpdate() {
           <input class="settings-input" id="m_phone" placeholder="Optional — enables reminder button" style="font-family:inherit">
         </div>
         <div class="modal-divider"></div>
-        <div class="modal-check-row">
-          <input type="checkbox" id="m_recurring" onchange="modalToggleRecurring(this.checked)">
-          <label class="modal-check-label" id="m_recurlabel" for="m_recurring">Repeat daily (recurring)</label>
-        </div>
+        <div style="font-size:11px;color:var(--muted);margin-bottom:8px">For repeating bookings, use "⟳ Manage recurring slots" on the room instead.</div>
         <button class="modal-save-btn" id="slotModalSaveBtn" onclick="saveSlotFromModal()">+ Add Slot</button>
         <button class="modal-cancel-btn" onclick="closeSlotModal()">Cancel</button>
       </div>
