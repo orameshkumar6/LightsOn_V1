@@ -3802,8 +3802,17 @@ function renderTimeline() {
 
   const now = new Date();
   const nowM = now.getHours()*60+now.getMinutes();
-  let rS, rE, day;
-  if (tlView==='12h')      { rS=Math.floor(Math.max(0,nowM-60)/60)*60; rE=rS+720; day=0; }
+  // Axis is in ABSOLUTE minutes: today = 0..1439, tomorrow = 1440..2879. Only
+  // the 12h "today" view is allowed to SPAN midnight (window can run past 1440
+  // into tomorrow); the "day" (full today) and tomorrow views stay within a
+  // single day, as before.
+  let rS, rE, day, spanning=false;
+  if (tlView==='12h') {
+    // 12-hour window starting ~1h before now. No longer clamped to 0, so late
+    // in the day it extends past midnight into tomorrow. day 0 = today is the
+    // primary bucket; tomorrow's bucket is drawn for the part past 1440.
+    rS=Math.floor((nowM-60)/60)*60; rE=rS+720; day=0; spanning=true;
+  }
   else if (tlView==='day') { rS=0; rE=1440; day=0; }
   else                     { rS=0; rE=1440; day=1; }
   const range=rE-rS, chartW=W-LABEL_W;
@@ -3816,7 +3825,7 @@ function renderTimeline() {
   // Rebuilt on every render so it always matches what's on screen (view
   // changes, data changes). Each bar records the room, the slot's ORIGINAL
   // index into room.slots[day] (needed by openSlotModalEdit), and its pixel box.
-  tlHit = { LABEL_W, TOP_H, ROW_H, rS, rE, day, chartW, minFor, bars: [], rowCount: state.rooms.length };
+  tlHit = { LABEL_W, TOP_H, ROW_H, rS, rE, day, chartW, minFor, spanning, bars: [], rowCount: state.rooms.length };
 
   const ticks=range<=720?7:13;
   for (let i=0;i<ticks;i++) {
@@ -3825,8 +3834,13 @@ function renderTimeline() {
     ctx.strokeStyle='rgba(255,255,255,0.06)'; ctx.lineWidth=1;
     ctx.beginPath(); ctx.moveTo(x,TOP_H); ctx.lineTo(x,H-BOT); ctx.stroke();
     if (m%60===0) {
-      const h=Math.floor(m/60);
-      const lbl=`${h===0?12:(h>12?h-12:h)}${h<12?'am':'pm'}`;
+      // 12-hour label with am/pm. Handle the full 0..24 range (tomorrow view can
+      // reach 24:00): normalise the hour into 0..23 first, then map to 12-hour.
+      // 0→12am, 1..11→1..11am, 12→12pm, 13..23→1..11pm.
+      const h24 = Math.floor(m/60) % 24;
+      const ampm = h24 < 12 ? 'am' : 'pm';
+      const h12  = h24 % 12 === 0 ? 12 : h24 % 12;
+      const lbl  = `${h12}${ampm}`;
       ctx.fillStyle='rgba(226,226,240,0.95)'; ctx.font='9px -apple-system,sans-serif'; ctx.textAlign='center';
       ctx.fillText(lbl, x, 11);
     }
@@ -3843,40 +3857,48 @@ function renderTimeline() {
     if (room.override===true)  { ctx.fillStyle='rgba(240,160,48,0.1)';  ctx.fillRect(LABEL_W,y+2,chartW,ROW_H-4); }
     if (room.override===false) { ctx.fillStyle='rgba(224,80,80,0.1)';   ctx.fillRect(LABEL_W,y+2,chartW,ROW_H-4); }
 
-    // Weekday for the day being drawn (day 0 = today, day 1 = tomorrow) — used
-    // to hide recurring instances that don't run on that day, matching the
-    // dashboard's slot filter.
-    const tlWeekday = (new Date().getDay() + day) % 7;
-    (room.slots[day]||[]).forEach((sl, origIdx) => {
-      if (sl.recurring && Array.isArray(sl.days) && sl.days.length && !sl.days.includes(tlWeekday)) return;
-      const sM=toMins(sl.s), eM=toMins(sl.e);
-      if (eM<=rS||sM>=rE) return;
-      const cS=Math.max(sM,rS), cE=Math.min(eM,rE);
-      const x1=xFor(cS), x2=xFor(cE);
-      const barH=18, barY=y+(ROW_H-barH)/2;
-      const barW=Math.max(x2-x1,3);
-      // Record for click hit-testing (Phase 6). origIdx is the index into the
-      // UNFILTERED room.slots[day], which is what openSlotModalEdit expects.
-      tlHit.bars.push({ roomId: room.id, origIdx, x1, x2: x1+barW, y1: barY, y2: barY+barH, recurring: !!sl.recurring });
-      // Bar colour: a manual room override (ON/OFF) is a room-wide state that
-      // wins for the whole row; otherwise colour by payment/recurring
-      // (green=paid, blue=unpaid, amber=recurring) — same scheme as the cards.
-      ctx.fillStyle = room.override===true ? '#f0a030'
-                    : room.override===false ? '#e05050'
-                    : slotPaymentHex(sl);
-      ctx.beginPath(); ctx.roundRect(x1,barY,barW,barH,3); ctx.fill();
-      // Partial-hour marker: a '*' centred on the bar when the booking doesn't
-      // fill whole clock hours (e.g. 14:00–14:30). Only drawn when the bar is
-      // wide enough to show it.
-      if (isPartialHourSlot(sl) && barW >= 10) {
-        ctx.fillStyle = '#1a1a2e';
-        ctx.font = 'bold 13px -apple-system,sans-serif';
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillText('*', x1 + barW/2, barY + barH/2 + 1);
-        ctx.textBaseline = 'alphabetic';
-      }
-    });
+    // Draw one bucket's bars for this room on the absolute-minute axis.
+    // bucketDay = 0 (today) or 1 (tomorrow); offsetMin shifts the bucket's
+    // local minutes onto the axis (0 for today, 1440 for tomorrow when the 12h
+    // view spans midnight). Each drawn bar records its bucketDay so the click
+    // handler edits/books in the correct day.
+    const drawBucketBars = (bucketDay, offsetMin) => {
+      const tlWeekday = (new Date().getDay() + bucketDay) % 7;
+      (room.slots[bucketDay]||[]).forEach((sl, origIdx) => {
+        if (sl.recurring && Array.isArray(sl.days) && sl.days.length && !sl.days.includes(tlWeekday)) return;
+        const sM=toMins(sl.s)+offsetMin, eM=toMins(sl.e)+offsetMin;
+        if (eM<=rS||sM>=rE) return;
+        const cS=Math.max(sM,rS), cE=Math.min(eM,rE);
+        const x1=xFor(cS), x2=xFor(cE);
+        const barH=18, barY=y+(ROW_H-barH)/2;
+        const barW=Math.max(x2-x1,3);
+        // Record for click hit-testing. origIdx indexes the UNFILTERED
+        // room.slots[bucketDay], and bucketDay tells the handler which day.
+        tlHit.bars.push({ roomId: room.id, origIdx, bucketDay, x1, x2: x1+barW, y1: barY, y2: barY+barH, recurring: !!sl.recurring });
+        // Bar colour: a manual room override (ON/OFF) is a room-wide state that
+        // wins for the whole row; otherwise colour by payment/recurring
+        // (green=paid, blue=unpaid, amber=recurring) — same scheme as the cards.
+        ctx.fillStyle = room.override===true ? '#f0a030'
+                      : room.override===false ? '#e05050'
+                      : slotPaymentHex(sl);
+        ctx.beginPath(); ctx.roundRect(x1,barY,barW,barH,3); ctx.fill();
+        // Partial-hour marker: a '*' centred on the bar when the booking doesn't
+        // fill whole clock hours (e.g. 14:00–14:30). Only when wide enough.
+        if (isPartialHourSlot(sl) && barW >= 10) {
+          ctx.fillStyle = '#1a1a2e';
+          ctx.font = 'bold 13px -apple-system,sans-serif';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillText('*', x1 + barW/2, barY + barH/2 + 1);
+          ctx.textBaseline = 'alphabetic';
+        }
+      });
+    };
+    // Primary bucket (today for the 12h/day view, tomorrow for the tomorrow view).
+    drawBucketBars(day, 0);
+    // When the 12h view spans midnight, also draw tomorrow's bucket shifted
+    // by a full day so the part of the window past 1440 shows tomorrow's slots.
+    if (spanning) drawBucketBars(1, 1440);
 
     ctx.fillStyle=ls.on?'#f0a030':'rgba(255,255,255,0.12)';
     ctx.beginPath(); ctx.arc(LABEL_W-4,y+ROW_H/2,4,0,Math.PI*2); ctx.fill();
@@ -3903,10 +3925,11 @@ function renderTimeline() {
 // Click / tap on the timeline canvas. Uses the geometry captured by the last
 // renderTimeline() (tlHit). A tap inside a slot bar opens that slot for editing;
 // a tap in a room's empty area snaps to the clicked clock hour and opens the
-// booking modal prefilled with that hour. Since the edit/add modals index into
-// r.slots[state.schedDay], we first align schedDay to the day the timeline is
-// showing (day 0 = today, day 1 = tomorrow) so the modal targets the right
-// bucket. Taps outside the chart area (labels/header) are ignored.
+// booking modal prefilled with that hour. The edit/add modals index into
+// r.slots[state.schedDay], so we set schedDay to the TARGET's day: for a bar,
+// the bucket it was drawn from; for an empty click in the 12h spanning view,
+// tomorrow (day 1) when the tapped minute is past midnight (>=1440), else the
+// view's own day. Taps outside the chart area (labels/header) are ignored.
 function handleTimelineClick(ev) {
   if (!tlHit) return;
   const canvas = document.getElementById('tlCanvas');
@@ -3923,13 +3946,11 @@ function handleTimelineClick(ev) {
   if (rowIdx < 0 || rowIdx >= tlHit.rowCount) return;
   if (px < tlHit.LABEL_W) return; // clicked the room-name label gutter
 
-  // Align the schedule day the modals read from to the timeline's day.
-  if (state.schedDay !== tlHit.day) setSchedDay(tlHit.day);
-
-  // 1. Bar hit? (edit)
+  // 1. Bar hit? (edit) — target the bucket the bar was drawn from.
   const hitBar = tlHit.bars.find(b =>
     px >= b.x1 && px <= b.x2 && py >= b.y1 && py <= b.y2);
   if (hitBar) {
+    if (state.schedDay !== hitBar.bucketDay) setSchedDay(hitBar.bucketDay);
     openSlotModalEdit(hitBar.roomId, hitBar.origIdx);
     return;
   }
@@ -3937,11 +3958,17 @@ function handleTimelineClick(ev) {
   // 2. Empty area → book the clicked clock hour on that room.
   const room = state.rooms[rowIdx];
   if (!room) return;
-  let mins = tlHit.minFor(px);
-  let hour = Math.floor(mins / 60);
+  const absMins = tlHit.minFor(px);           // absolute-minute axis (may be >=1440 tomorrow)
+  // Spanning 12h view: minutes >=1440 belong to tomorrow. Book into that day
+  // and convert to a local hour-of-day; otherwise use the view's own day.
+  let targetDay = tlHit.day;
+  let localMins = absMins;
+  if (tlHit.spanning && absMins >= 1440) { targetDay = 1; localMins = absMins - 1440; }
+  let hour = Math.floor(localMins / 60);
   hour = Math.max(0, Math.min(23, hour)); // clamp into the day
   const startStr = String(hour).padStart(2, '0') + ':00';
-  const endStr   = String(hour + 1).padStart(2, '0') + ':00'; // hour+1 <= 24 → "24:00" only when hour=23
+  const endStr   = String(hour + 1).padStart(2, '0') + ':00'; // "24:00" only when hour=23
+  if (state.schedDay !== targetDay) setSchedDay(targetDay);
   openSlotModal(room.id, { start: startStr, end: endStr === '24:00' ? '23:59' : endStr });
 }
 
