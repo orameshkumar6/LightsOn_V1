@@ -3827,7 +3827,7 @@ function renderTimeline() {
     if (m%60===0) {
       const h=Math.floor(m/60);
       const lbl=`${h===0?12:(h>12?h-12:h)}${h<12?'am':'pm'}`;
-      ctx.fillStyle='rgba(136,136,170,0.8)'; ctx.font='9px -apple-system,sans-serif'; ctx.textAlign='center';
+      ctx.fillStyle='rgba(226,226,240,0.95)'; ctx.font='9px -apple-system,sans-serif'; ctx.textAlign='center';
       ctx.fillText(lbl, x, 11);
     }
   }
@@ -3837,7 +3837,7 @@ function renderTimeline() {
     const ls=getLightState(room);
     ctx.fillStyle=i%2===0?'rgba(255,255,255,0.02)':'transparent';
     ctx.fillRect(LABEL_W,y,chartW,ROW_H);
-    ctx.fillStyle='rgba(136,136,170,0.85)'; ctx.font='11px -apple-system,sans-serif'; ctx.textAlign='right';
+    ctx.fillStyle='rgba(230,230,242,0.95)'; ctx.font='11px -apple-system,sans-serif'; ctx.textAlign='right';
     ctx.fillText(room.name, LABEL_W-10, y+ROW_H/2+4);
 
     if (room.override===true)  { ctx.fillStyle='rgba(240,160,48,0.1)';  ctx.fillRect(LABEL_W,y+2,chartW,ROW_H-4); }
