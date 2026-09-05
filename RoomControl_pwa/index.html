@@ -1032,6 +1032,14 @@ function buildWhatsAppNumber(raw, countryCode) {
 // is the way to make the code stand out).
 const DEFAULT_WHATSAPP_TEMPLATE = 'Hi {NAME}, your booking for {PROFILE} - {ROOM} on {DATE} from {START} to {END} is confirmed.\n\nYour activation code:\n```{CODE}```\n\nActivate with Lights On and enjoy your game.';
 
+// PWA-side defaults for the end-of-slot warning, applied to newly created
+// profiles and to old backups on restore (NOT the ESP32 firmware fallback,
+// which stays warning-off unless /config explicitly sets these). Once a
+// profile is saved these are written to /config and the ESP32 reads them.
+const DEFAULT_WARN_MINUTES = 5;   // warn 5 min before a slot ends
+const DEFAULT_BEEP_MS      = 150; // 150 ms per beep
+const DEFAULT_BEEP_COUNT   = 2;   // 2 beeps per burst
+
 function fillWhatsAppTemplate(template, data) {
   return (template || '').replace(/\{([A-Z_]+)\}/g, (match, key) => {
     const val = data[key];
@@ -2173,7 +2181,8 @@ function hydrate() {
       // Migrate legacy single-config format (pre-profiles) into a "Default" profile
       const p = { id: makeProfileId(), name: 'Default',
         dbUrl: d.config.dbUrl || '', apiKey: d.config.apiKey || '',
-        adminSeed: d.config.adminSeed || '1234', relayWiring: 'NC', templates: [] };
+        adminSeed: d.config.adminSeed || '1234', relayWiring: 'NC', templates: [],
+        warnMinutes: DEFAULT_WARN_MINUTES, beepMs: DEFAULT_BEEP_MS, beepCount: DEFAULT_BEEP_COUNT };
       state.profiles = [p];
       state.activeProfileId = p.id;
     }
@@ -2208,7 +2217,8 @@ function hydrate() {
   } catch(e) {}
 
   if (!state.profiles.length) {
-    const p = { id: makeProfileId(), name: 'Default', dbUrl: '', apiKey: '', adminSeed: '1234', relayWiring: 'NC', templates: [] };
+    const p = { id: makeProfileId(), name: 'Default', dbUrl: '', apiKey: '', adminSeed: '1234', relayWiring: 'NC', templates: [],
+      warnMinutes: DEFAULT_WARN_MINUTES, beepMs: DEFAULT_BEEP_MS, beepCount: DEFAULT_BEEP_COUNT };
     state.profiles = [p];
     state.activeProfileId = p.id;
   }
@@ -2597,6 +2607,53 @@ async function checkDailySlotRefresh(p) {
 //      stale cached copy of are NOT pushed, so a change another device made
 //      (like a deleted slot) is never resurrected by a blind re-upload.
 //   2. PULL /rooms and replace local — Firebase is authoritative.
+// Pulls ALL shared Settings-page values from /config back into the active
+// profile so Firebase is authoritative for config the same way it is for
+// rooms. Without this, a config change (admin seed, beep, warn, pins, WhatsApp
+// template/country code, relay wiring) made on one device never reached other
+// devices sharing the profile — they kept showing their own local values (the
+// "different admin code per device" symptom). Called from manualSyncFromFirebase
+// on the MANUAL Sync button ONLY — never the silent on-load auto-sync — so a
+// pull only happens when the user explicitly asks for it. Only keys actually
+// present in Firebase overwrite the local value, so a partially-written /config
+// never blanks out local settings. Reverses exactly what finishSaveSettings()
+// writes: adminSeed / whatsapp* / relayWiring are strings; the pins/warn/beep
+// values are numbers or null (an explicit beepCount of 0 = "muted" is
+// preserved). Returns true if any local value changed.
+async function pullConfigFromFirebase(p) {
+  const cfg = await fbGet('/config', p);
+  if (!cfg || typeof cfg !== 'object') return false;
+  let changed = false;
+  const setIf = (key, val) => {
+    if (p[key] !== val) { p[key] = val; changed = true; }
+  };
+  // Present-but-null in Firebase means "explicitly cleared" → local null.
+  // Absent (undefined) means the key was never written → leave local as-is.
+  const numOrNull = v => (v === null || v === undefined || v === '' || isNaN(parseInt(v, 10))) ? null : parseInt(v, 10);
+
+  if (cfg.adminSeed !== undefined && cfg.adminSeed !== null)
+    setIf('adminSeed', String(cfg.adminSeed));
+  if ('emergencyPin' in cfg) setIf('emergencyPin', numOrNull(cfg.emergencyPin));
+  if ('beeperPin' in cfg)    setIf('beeperPin',    numOrNull(cfg.beeperPin));
+  if ('warnMinutes' in cfg)  setIf('warnMinutes',  numOrNull(cfg.warnMinutes));
+  if ('beepMs' in cfg)       setIf('beepMs',       numOrNull(cfg.beepMs));
+  // beepCount: an explicit 0 is a valid "muted" value, distinct from null.
+  if ('beepCount' in cfg) {
+    const bc = (cfg.beepCount === null || cfg.beepCount === undefined || cfg.beepCount === '') ? null : Math.max(0, parseInt(cfg.beepCount, 10) || 0);
+    setIf('beepCount', bc);
+  }
+  // WhatsApp + relay wiring — string values. Present-and-non-null overwrites;
+  // a blank/absent value falls back to the same defaults renderSettings uses,
+  // so the field never ends up undefined.
+  if (cfg.whatsappTemplate !== undefined && cfg.whatsappTemplate !== null)
+    setIf('whatsappTemplate', String(cfg.whatsappTemplate) || DEFAULT_WHATSAPP_TEMPLATE);
+  if (cfg.whatsappCountryCode !== undefined && cfg.whatsappCountryCode !== null)
+    setIf('whatsappCountryCode', String(cfg.whatsappCountryCode).replace(/[^\d]/g, '') || '91');
+  if (cfg.relayWiring === 'NC' || cfg.relayWiring === 'NO')
+    setIf('relayWiring', cfg.relayWiring);
+  return changed;
+}
+
 async function manualSyncFromFirebase(opts) {
   opts = opts || {};
   const silent = !!opts.silent;
@@ -2650,8 +2707,19 @@ async function manualSyncFromFirebase(opts) {
       state.rooms[idx].recurringDefs = normalizeSlots(remote.recurring);
       updated++;
     });
+    // ── 3. PULL shared /config back into the active profile ──
+    // MANUAL sync only (the Sync button) — NOT the silent on-load auto-sync.
+    // Firebase is authoritative for all Settings-page values here. If the
+    // Settings page is open we re-render it so pulled values show; the sync
+    // button lives in the header so tapping it isn't mid-typing, and the user
+    // explicitly asked for the refresh by pressing it.
+    let cfgChanged = false;
+    if (!silent) {
+      try { cfgChanged = await pullConfigFromFirebase(p); } catch (e) { addLog('error', 'Config sync failed: ' + e.message); }
+    }
     persist();
     renderDashboard(); // timeline re-renders on its own when that tab is opened (showPage)
+    if (cfgChanged) renderSettings(); // repaint the whole Settings form from the pulled values
     setConnStatus(true);
     addLog('ok', (silent ? 'Auto' : 'Manual') + ' sync — pushed dirty rooms, replaced local with Firebase');
     if (!silent) showToast(pushOk
@@ -3915,7 +3983,8 @@ async function saveAsNewProfile() {
     apiKey: document.getElementById('cfg-key').value.trim(),
     adminSeed: document.getElementById('cfg-seed').value.trim() || '1234',
     relayWiring: 'NC',
-    templates: []
+    templates: [],
+    warnMinutes: DEFAULT_WARN_MINUTES, beepMs: DEFAULT_BEEP_MS, beepCount: DEFAULT_BEEP_COUNT
   };
   state.profiles.push(p);
   state.activeProfileId = p.id; // ensureProfileNumber below resolves against getActiveProfile(), so this must be set first
@@ -3975,6 +4044,13 @@ function finishSaveSettings(p, message) {
     fbSet('/config/warnMinutes', p.warnMinutes === null || p.warnMinutes === undefined ? null : p.warnMinutes, p);
     fbSet('/config/beepMs', p.beepMs === null || p.beepMs === undefined ? null : p.beepMs, p);
     fbSet('/config/beepCount', p.beepCount === null || p.beepCount === undefined ? null : p.beepCount, p);
+    // Also push the WhatsApp + relay-wiring settings so the manual Sync on
+    // another device can pull them back (Firebase authoritative for all
+    // Settings-page values). relayWiring is also written on its own toggle;
+    // writing it here too keeps /config complete after any Save.
+    fbSet('/config/whatsappTemplate', p.whatsappTemplate || DEFAULT_WHATSAPP_TEMPLATE, p);
+    fbSet('/config/whatsappCountryCode', p.whatsappCountryCode || '91', p);
+    fbSet('/config/relayWiring', p.relayWiring || 'NC', p);
     pushAllRooms(p);
     startFbListener();
   }
@@ -4121,6 +4197,28 @@ function restoreFromFile(event) {
 
       // Apply the backup
       state.profiles = data.profiles;
+      // Defensive init — an OLD backup predates the config fields added later
+      // (WhatsApp template/country code, beeper/warn/beep, relay wiring, admin
+      // seed). Fill any missing key with the same defaults the reads use, so a
+      // restored profile object is complete rather than carrying undefined
+      // holes. Pins/warn/beep stay null (= "unset"), matching a fresh profile.
+      // Applied to EVERY profile, not just the active one, since switching to
+      // any of them later must find a well-formed object. Existing values are
+      // never overwritten (?? / hasOwn guards).
+      state.profiles.forEach(p => {
+        if (p.adminSeed === undefined || p.adminSeed === null || p.adminSeed === '') p.adminSeed = '1234';
+        if (p.whatsappTemplate === undefined || p.whatsappTemplate === null || p.whatsappTemplate === '') p.whatsappTemplate = DEFAULT_WHATSAPP_TEMPLATE;
+        if (p.whatsappCountryCode === undefined || p.whatsappCountryCode === null || p.whatsappCountryCode === '') p.whatsappCountryCode = '91';
+        if (p.relayWiring !== 'NC' && p.relayWiring !== 'NO') p.relayWiring = 'NC';
+        if (!('emergencyPin' in p)) p.emergencyPin = null;
+        if (!('beeperPin' in p))    p.beeperPin = null;
+        // warn/beep default to sensible values (not null) for old backups that
+        // predate these fields — matches the new-profile defaults.
+        if (!('warnMinutes' in p))  p.warnMinutes = DEFAULT_WARN_MINUTES;
+        if (!('beepMs' in p))       p.beepMs = DEFAULT_BEEP_MS;
+        if (!('beepCount' in p))    p.beepCount = DEFAULT_BEEP_COUNT;
+        if (!Array.isArray(p.templates)) p.templates = [];
+      });
       state.activeProfileId = data.activeProfileId || data.profiles[0].id;
       state.roomsByProfile = data.roomsByProfile;
       state.licenseKey = data.licenseKey || null;
