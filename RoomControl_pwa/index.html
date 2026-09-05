@@ -196,12 +196,12 @@
       font-size: 12px; color: var(--muted); cursor: pointer; min-height: 36px; }
     .modal-day-btn.active { background: var(--accent); color: white; border-color: var(--accent); }
 
-    /* ── Slot creation — day-view 30-min picker ─────────────────── */
+    /* ── Slot creation — day-view 1-hour picker ─────────────────── */
     .modal-grid-hint { font-size: 11px; color: var(--muted); margin-bottom: 8px;
       display: flex; justify-content: space-between; align-items: center; gap: 8px; }
     .grid-clear-link { color: var(--accent); cursor: pointer; text-decoration: underline; flex-shrink: 0; }
-    /* 6 columns × 8 rows = all 48 half-hour blocks, but the container only
-       shows 3 rows at a time — scrolls vertically for the rest */
+    /* 6 columns × 4 rows = all 24 one-hour blocks (00:00–23:00); the container
+       shows ~3 rows at a time and scrolls vertically for the rest */
     .time-grid { display: grid; grid-template-columns: repeat(6, 1fr); grid-auto-rows: 26px;
       gap: 4px; margin-bottom: 10px; max-height: 90px; overflow-y: auto;
       -webkit-overflow-scrolling: touch; }
@@ -264,6 +264,11 @@
     .profile-btn:hover { color: var(--text); border-color: var(--text); }
     /* Slot activation styles */
     .slot-code { font-size: 11px; font-family: monospace; background: rgba(240,160,48,0.15); color: var(--amber); padding: 2px 7px; border-radius: 6px; font-weight: 700; letter-spacing: 2px; }
+    /* Payment chip — tap to toggle paid/unpaid; colour matches the row stripe */
+    .slot-pay-chip { font-size: 10px; font-weight: 700; letter-spacing: 0.5px; padding: 2px 8px; border-radius: 10px; cursor: pointer; user-select: none; border: 1px solid transparent; }
+    .slot-pay-chip.paid   { background: rgba(64,192,128,0.18);  color: var(--green);  border-color: rgba(64,192,128,0.5); }
+    .slot-pay-chip.unpaid { background: rgba(74,143,255,0.15);  color: var(--accent); border-color: rgba(74,143,255,0.5); }
+    .slot-pay-chip:hover  { filter: brightness(1.2); }
     .code-input-row { display: flex; gap: 6px; align-items: center; margin-bottom: 8px; }
     .code-input-row label { font-size: 12px; color: var(--muted); width: 40px; flex-shrink: 0; }
     .code-input { width: 80px; background: var(--card2); border: 1px solid var(--amber); border-radius: 8px; color: var(--amber); font-size: 16px; font-family: monospace; font-weight: 700; letter-spacing: 4px; padding: 6px 10px; text-align: center; }
@@ -407,7 +412,8 @@
       <div class="tl-legend-item"><div class="tl-legend-dot" style="background:#f0a030"></div>Manual ON</div>
       <div class="tl-legend-item"><div class="tl-legend-dot" style="background:#e05050"></div>Manual OFF</div>
     </div>
-    <div class="timeline-wrap"><canvas id="tlCanvas"></canvas></div>
+    <div class="timeline-wrap"><canvas id="tlCanvas" style="cursor:pointer" onclick="handleTimelineClick(event)"></canvas></div>
+    <div style="font-size:11px;color:var(--muted);margin-top:6px;text-align:center">Tap a booking to edit it, or tap an empty hour to book it.</div>
     <div class="stats-row" style="margin-top:12px">
       <div class="stat-card"><div class="stat-val green" id="tl-on">0</div><div class="stat-lbl">On now</div></div>
       <div class="stat-card"><div class="stat-val accent" id="tl-slots">0</div><div class="stat-lbl">Slots today</div></div>
@@ -719,6 +725,9 @@ function formatDaySet(days) {
 let fbConnected = false;
 let fbListener = null;
 let tlView = '12h';
+// Timeline hit-test geometry, rebuilt every renderTimeline(). Lets the canvas
+// click handler map a tap to a slot bar (→ edit) or an empty hour (→ book).
+let tlHit = null;
 // Tracks the savedAt this tab last read/wrote — lets persist() detect when
 // another tab has saved more recently, so a stale background tab can't
 // silently clobber a newer save (e.g. an old tab left open elsewhere).
@@ -806,6 +815,33 @@ function normalizeSlots(slots) {
   if (Array.isArray(slots)) return slots;
   // Firebase converted array to object with numeric keys
   return Object.keys(slots).sort((a,b) => parseInt(a)-parseInt(b)).map(k => slots[k]).filter(Boolean);
+}
+
+// ── Payment status + partial-hour helpers ─────────────────────
+// Payment is a simple 2-state flag on each slot/def: paid (true) or unpaid
+// (false, the default). Recurring slots are shown amber regardless of payment
+// (per design), so the paid flag only drives colour for one-time slots.
+// A slot is "partially booked" when its booked time does not fill the whole
+// clock hour(s) it sits in — i.e. its start isn't on an hour boundary or its
+// end isn't on an hour boundary (e.g. 14:00–14:30, or 14:15–15:00). A slot
+// that spans exact hours (14:00–15:00, 14:00–16:00) is NOT partial. This is
+// computed from the times, never stored, so it always reflects the current
+// start/end. Shown as a '*' next to the time on the card and timeline.
+function isPartialHourSlot(sl) {
+  const sm = toMins(sl.s), em = toMins(sl.e);
+  if (isNaN(sm) || isNaN(em) || em <= sm) return false;
+  return (sm % 60 !== 0) || (em % 60 !== 0);
+}
+// Colour a slot resolves to for its payment/recurring indicator (stripe +
+// timeline bar). Recurring → amber; else paid → green, unpaid → blue.
+function slotPaymentColor(sl) {
+  if (sl.recurring) return 'var(--amber)';
+  return sl.paid ? 'var(--green)' : 'var(--accent)';
+}
+// Same, as raw hex for the canvas timeline (no CSS vars there).
+function slotPaymentHex(sl) {
+  if (sl.recurring) return '#f0a030';
+  return sl.paid ? '#40c080' : '#4a8fff';
 }
 
 // ── Booking-import template engine ────────────────────────────
@@ -1410,6 +1446,7 @@ function recClearForm() {
   document.getElementById('rec_code').value  = '';
   document.getElementById('rec_name').value  = '';
   document.getElementById('rec_phone').value = '';
+  document.getElementById('rec_paid').checked = false;
   rebuildRecDayPills();
 }
 
@@ -1428,6 +1465,7 @@ function editRecurringDef(defId) {
   document.getElementById('rec_code').value  = d.code || '';
   document.getElementById('rec_name').value  = d.bookedBy || '';
   document.getElementById('rec_phone').value = d.phone || '';
+  document.getElementById('rec_paid').checked = !!d.paid;
   rebuildRecDayPills();
 }
 
@@ -1468,14 +1506,16 @@ async function saveRecurringFromModal() {
   const code = (codeInput.length === 4 && /^[0-9]{4}$/.test(codeInput)) ? codeInput : generate4DigitCode();
   const bookedBy = document.getElementById('rec_name').value.trim() || null;
   const phone    = document.getElementById('rec_phone').value.trim() || null;
+  const recPaidEl = document.getElementById('rec_paid');
+  const paid     = recPaidEl ? !!recPaidEl.checked : false; // default unpaid
   const days = [...recEditingDays].sort((a,b)=>a-b);
 
   if (!Array.isArray(r.recurringDefs)) r.recurringDefs = [];
   if (recEditingDefId) {
     const d = r.recurringDefs.find(x => x.id === recEditingDefId);
-    if (d) { d.s = s; d.e = e; d.days = days; d.code = code; d.bookedBy = bookedBy; d.phone = phone; }
+    if (d) { d.s = s; d.e = e; d.days = days; d.code = code; d.bookedBy = bookedBy; d.phone = phone; d.paid = paid; }
   } else {
-    r.recurringDefs.push({ id: makeRecurDefId(), s, e, days, code, bookedBy, phone });
+    r.recurringDefs.push({ id: makeRecurDefId(), s, e, days, code, bookedBy, phone, paid });
   }
 
   // Re-materialize today/tomorrow from the current defs so this change is
@@ -1513,20 +1553,27 @@ let modalRoomId  = null;
 let modalDay     = 0;
 let editingSlotIdx = null; // null = adding a new slot; a number = editing that slot index
 
-// ── Day-view 30-min time picker (inside the slot modal) ────────
+// ── Day-view 1-hour time picker (inside the slot modal) ────────
+// Blocks are whole clock hours (00:00, 01:00, … 23:00) — 24 in total. A single
+// tap picks that one-hour slot (e.g. block 9 → 09:00–10:00); a two-tap range
+// spans from the first hour's start to the second hour's END. Free-form typing
+// in the Start/End inputs is still allowed for non-hour bookings; the grid just
+// leaves itself unselected when the times don't land on hour boundaries.
+const GRID_BLOCKS   = 24;   // one block per clock hour
+const GRID_STEP_MIN = 60;   // minutes per block
 let modalGridBuilt    = false;
 let modalGridAnchor   = null; // block index waiting for its range partner, or null
 let modalGridSelStart = null; // first selected block index, or null if nothing selected
 let modalGridSelEnd   = null; // last selected block index (inclusive)
 
 function timeGridLabel(idx) {
-  const mins = idx * 30;
+  const mins = idx * GRID_STEP_MIN;
   return String(Math.floor(mins / 60)).padStart(2, '0') + ':' + String(mins % 60).padStart(2, '0');
 }
 
 function buildTimeGridHtml() {
   let html = '';
-  for (let i = 0; i < 48; i++) {
+  for (let i = 0; i < GRID_BLOCKS; i++) {
     html += `<button type="button" class="time-block" id="tb_${i}" onclick="gridBlockClick(${i})">${timeGridLabel(i)}</button>`;
   }
   return html;
@@ -1558,7 +1605,7 @@ function clearGridSelection() {
 }
 
 function renderGridSelection() {
-  for (let i = 0; i < 48; i++) {
+  for (let i = 0; i < GRID_BLOCKS; i++) {
     const el = document.getElementById('tb_' + i);
     if (!el) continue;
     const inRange = modalGridSelStart !== null && i >= modalGridSelStart && i <= modalGridSelEnd;
@@ -1574,20 +1621,20 @@ function syncModalTimesFromGrid() {
 }
 
 // Reflects the modal's current Start/End inputs onto the grid when they land
-// exactly on 30-min boundaries (e.g. the 09:00–10:00 default, or after the
+// exactly on 1-hour boundaries (e.g. the 09:00–10:00 default, or after the
 // user picks via the grid itself). A manually-typed time that doesn't align
-// to a half-hour just leaves the grid unselected — it's a shortcut layer on
+// to a whole hour just leaves the grid unselected — it's a shortcut layer on
 // top of the inputs, not a replacement for them.
 function syncGridFromModalTimes() {
   const toIdx = (t) => {
     if (!t) return null;
     const [h, m] = t.split(':').map(Number);
     if (isNaN(h) || isNaN(m)) return null;
-    return (h * 60 + m) / 30;
+    return (h * 60 + m) / GRID_STEP_MIN;
   };
   const si = toIdx(document.getElementById('m_start').value);
   const ei = toIdx(document.getElementById('m_end').value);
-  if (Number.isInteger(si) && Number.isInteger(ei) && si >= 0 && ei > si && ei <= 48) {
+  if (Number.isInteger(si) && Number.isInteger(ei) && si >= 0 && ei > si && ei <= GRID_BLOCKS) {
     modalGridSelStart = si;
     modalGridSelEnd = ei - 1;
   } else {
@@ -1604,35 +1651,46 @@ function syncGridFromModalTimes() {
 function renderGridOccupancy() {
   const r = modalRoomId ? state.rooms.find(x => x.id === modalRoomId) : null;
   const slots = (r && r.slots[modalDay]) || [];
-  const occupied = new Array(48).fill(false);
+  const occupied = new Array(GRID_BLOCKS).fill(false);
   slots.forEach(sl => {
     const [sh, sm] = (sl.s || '').split(':').map(Number);
     const [eh, em] = (sl.e || '').split(':').map(Number);
     if (isNaN(sh) || isNaN(sm) || isNaN(eh) || isNaN(em)) return;
-    const si = Math.floor((sh * 60 + sm) / 30);
-    const ei = Math.ceil((eh * 60 + em) / 30);
-    for (let i = Math.max(0, si); i < Math.min(48, ei); i++) occupied[i] = true;
+    const si = Math.floor((sh * 60 + sm) / GRID_STEP_MIN);
+    const ei = Math.ceil((eh * 60 + em) / GRID_STEP_MIN);
+    for (let i = Math.max(0, si); i < Math.min(GRID_BLOCKS, ei); i++) occupied[i] = true;
   });
-  for (let i = 0; i < 48; i++) {
+  for (let i = 0; i < GRID_BLOCKS; i++) {
     const el = document.getElementById('tb_' + i);
     if (el) el.classList.toggle('occupied', occupied[i]);
   }
 }
 
-function openSlotModal(roomId) {
+// opts.start / opts.end (optional "HH:MM") prefill the time inputs — used by the
+// clickable timeline to open the modal on the tapped hour. Omitted → defaults to
+// the CURRENT clock hour (e.g. opening at 14:37 pre-fills 14:00–15:00), so a
+// booking for "right now" needs no time editing. The 23:00 hour clamps its end
+// to 23:59 to stay within the day.
+function openSlotModal(roomId, opts) {
   if (!requireLicense('add a slot')) return;
+  opts = opts || {};
   editingSlotIdx = null; // add mode
   modalRoomId = roomId;
   modalDay    = state.schedDay;
   const r     = state.rooms.find(x => x.id === roomId);
   document.getElementById('modalTitle').textContent = 'Add Slot — ' + r.name;
   document.getElementById('slotModalSaveBtn').textContent = '+ Add Slot';
+  // Current-hour default (used when no explicit prefill is passed).
+  const curHour   = new Date().getHours();
+  const defStart  = String(curHour).padStart(2, '0') + ':00';
+  const defEnd    = curHour >= 23 ? '23:59' : String(curHour + 1).padStart(2, '0') + ':00';
   // Reset form
-  document.getElementById('m_start').value    = '09:00';
-  document.getElementById('m_end').value      = '10:00';
+  document.getElementById('m_start').value    = opts.start || defStart;
+  document.getElementById('m_end').value      = opts.end   || defEnd;
   document.getElementById('m_code').value     = '';
   document.getElementById('m_name').value     = '';
   document.getElementById('m_phone').value    = '';
+  document.getElementById('m_paid').checked   = false; // new bookings default to unpaid
   document.getElementById('m_reqcode').checked  = true;
   document.getElementById('m_coderow').style.opacity = '1';
   document.getElementById('m_coderow').style.pointerEvents = '';
@@ -1641,7 +1699,7 @@ function openSlotModal(roomId) {
     document.getElementById('modalTimeGrid').innerHTML = buildTimeGridHtml();
     modalGridBuilt = true;
   }
-  syncGridFromModalTimes(); // highlights the 09:00–10:00 default
+  syncGridFromModalTimes(); // highlights the prefilled (or default) range on the grid
   // Day buttons
   setModalDay(state.schedDay);
   document.getElementById('slotModal').classList.add('show');
@@ -1668,6 +1726,7 @@ function openSlotModalEdit(roomId, slotIdx) {
   document.getElementById('m_code').value     = slot.code || '';
   document.getElementById('m_name').value     = slot.bookedBy || '';
   document.getElementById('m_phone').value    = slot.phone || '';
+  document.getElementById('m_paid').checked   = !!slot.paid;
   const hasCode = !!slot.code;
   document.getElementById('m_reqcode').checked = hasCode;
   document.getElementById('m_coderow').style.opacity = hasCode ? '1' : '0.3';
@@ -1778,6 +1837,8 @@ async function saveSlotFromModal() {
   const recurring    = false; // add-slot creates one-time slots only; recurring is managed separately
   const bookedBy     = document.getElementById('m_name').value.trim() || null;
   const phone        = document.getElementById('m_phone').value.trim() || null;
+  const paidEl       = document.getElementById('m_paid');
+  const paid         = paidEl ? !!paidEl.checked : false; // default unpaid
 
   // Build date string
   let dateStr;
@@ -1804,6 +1865,7 @@ async function saveSlotFromModal() {
     slot.code = slotCode;
     slot.bookedBy = bookedBy;
     slot.phone = phone;
+    slot.paid = paid;
     slot.date = dateStr;
     slot.expired = false;
     if (timeChanged || codeChanged) {
@@ -1837,6 +1899,7 @@ async function saveSlotFromModal() {
   r.slots[modalDay].push({
     s: s, e: e, recurring,
     code: slotCode,
+    paid,
     activatedAt: null, activatedBy: null,
     attempts: 0, lockedUntil: null, expired: false,
     _fresh: true,
@@ -1856,6 +1919,26 @@ async function saveSlotFromModal() {
 
 function generate4DigitCode() {
   return String(Math.floor(1000 + Math.random() * 9000));
+}
+
+// Toggle a slot's payment status straight from the dashboard card — no need to
+// open the edit screen. Flips s.paid, persists, and pushes. paid rides along in
+// pushRoom's per-slot patch, so no separate Firebase write is needed (unlike
+// the activation-field resets in editSlotCode). Recurring instances don't show
+// the chip (payment isn't colour-coded for them), so this only ever runs on
+// one-time slots — but it's harmless if called on one.
+async function toggleSlotPaid(roomId, slotIdx) {
+  if (!requireLicense('update payment status')) return;
+  const r = state.rooms.find(x => x.id === roomId);
+  if (!r) return;
+  const slot = (r.slots[state.schedDay] || [])[slotIdx];
+  if (!slot) { showToast('Slot not found'); return; }
+  slot.paid = !slot.paid;
+  markRoomDirty(roomId - 1);
+  persist();
+  await pushRoom(roomId - 1);
+  renderDashboard();
+  showToast(slot.paid ? '✓ Marked as paid' : 'Marked as unpaid');
 }
 
 async function editSlotCode(roomId, slotIdx) {
@@ -2206,9 +2289,15 @@ function hydrate() {
       if (r.slots) {
         r.slots[0] = normalizeSlots(r.slots[0]);
         r.slots[1] = normalizeSlots(r.slots[1]);
+        // Defensive init: slots saved before the payment feature have no `paid`
+        // field — normalize to a real boolean (reads already coerce via !!, this
+        // just keeps the stored data clean/consistent).
+        r.slots[0].forEach(sl => { sl.paid = !!sl.paid; });
+        r.slots[1].forEach(sl => { sl.paid = !!sl.paid; });
       }
       // Defensive init for rooms saved before recurringDefs existed.
       if (!Array.isArray(r.recurringDefs)) r.recurringDefs = [];
+      r.recurringDefs.forEach(d => { d.paid = !!d.paid; });
     });
 
     if (d.log) state.log = d.log;
@@ -2813,6 +2902,9 @@ async function pushRoom(idx, profile) {
       // field for a slot with no booker rather than leaving a stale value.
       bookedBy: sl.bookedBy || null,
       phone: sl.phone || null,
+      // Payment status (paid/unpaid) — written so it survives sync and shows
+      // on other devices. Default false when absent.
+      paid: !!sl.paid,
       // Per-slot recurring weekday set (0=Sun..6=Sat) — written so the day-of-
       // week recurrence persists and reaches the ESP32. null for non-recurring
       // slots or recurring slots with no restriction (runs every day).
@@ -2883,6 +2975,8 @@ async function pushRoom(idx, profile) {
   const tomorrowSlots = normalizeSlots(r.slots[1]);
   const slotsT = tomorrowSlots.map(sl => ({
     s: sl.s, e: sl.e, recurring: sl.recurring, code: sl.code, date: sl.date, expired: false,
+    paid: !!sl.paid,
+    bookedBy: sl.bookedBy || null, phone: sl.phone || null,
     days: (sl.recurring && Array.isArray(sl.days) && sl.days.length) ? sl.days : null
   }));
   ok = await fbPatch(roomBase, { slotsT }, p) && ok;
@@ -2900,7 +2994,8 @@ async function pushRoom(idx, profile) {
       days: (Array.isArray(d.days) && d.days.length) ? d.days : null,
       code: d.code || null,
       bookedBy: d.bookedBy || null,
-      phone: d.phone || null
+      phone: d.phone || null,
+      paid: !!d.paid
     }, p) && ok;
   }
   const existingDefs = await fbGet(`${roomBase}/recurring`, p);
@@ -2991,6 +3086,7 @@ function materializeRecurringSlot(def, dateStr) {
     code: def.code || null,
     bookedBy: def.bookedBy || null,
     phone: def.phone || null,
+    paid: !!def.paid,
     activatedAt: null, activatedBy: null,
     attempts: 0, lockedUntil: null, expired: false,
     _fresh: true,
@@ -3573,10 +3669,22 @@ function renderRoomCard(r) {
             const badgeTxt = s.recurring
               ? ('recurring' + (hasDayRestriction ? ' · ' + formatDaySet(s.days) : ''))
               : 'one-time';
-            return `<div class="slot-item" style="flex-wrap:wrap;gap:5px${isExpired ? ';opacity:0.5' : ''}">
+            // Payment status colour (recurring→amber, else paid→green / unpaid→blue)
+            // drives a thick left-edge stripe on the whole row for at-a-glance
+            // scanning. Partial-hour bookings show a '*' next to the time.
+            const payCol   = slotPaymentColor(s);
+            const partial  = isPartialHourSlot(s);
+            // Tappable PAID/UNPAID chip — one-time slots only (recurring payment
+            // isn't colour-coded per design). Tapping toggles s.paid and writes
+            // through immediately (see toggleSlotPaid).
+            const payChip = !s.recurring
+              ? `<span class="slot-pay-chip ${s.paid ? 'paid' : 'unpaid'}" onclick="toggleSlotPaid(${r.id},${i})" title="Tap to toggle paid / unpaid">${s.paid ? 'PAID' : 'UNPAID'}</span>`
+              : '';
+            return `<div class="slot-item" style="flex-wrap:wrap;gap:5px;border-left:4px solid ${payCol};padding-left:8px${isExpired ? ';opacity:0.5' : ''}">
               <div class="slot-dot" style="background:${isActive ? 'var(--green)' : isExpired ? 'var(--muted)' : isWaiting ? 'var(--amber)' : dotCol}"></div>
-              <span class="slot-time">${s.s} – ${s.e}</span>
+              <span class="slot-time">${s.s} – ${s.e}${partial ? `<span title="Partially booked hour" style="color:var(--amber);font-weight:700"> *</span>` : ''}</span>
               <span style="font-size:10px;padding:1px 6px;border-radius:10px;background:${badgeBg};color:${badgeCol}">${badgeTxt}</span>
+              ${payChip}
               ${s.code ? `<span class="slot-code" id="slotcode_${r.id}_${i}" onclick="editSlotCode(${r.id},${i})" title="Tap to change code" style="cursor:pointer">${s.code}</span>` : `<span style="font-size:11px;padding:2px 7px;border-radius:6px;background:rgba(64,192,128,0.15);color:var(--green);font-weight:600">Auto</span>`}
               ${isActive   ? `<span class="slot-status active">✓ Active</span>` : ''}
               ${isWaiting  ? `<span class="slot-status waiting">⏳ Waiting</span>` : ''}
@@ -3656,6 +3764,15 @@ function renderTimeline() {
   else                     { rS=0; rE=1440; day=1; }
   const range=rE-rS, chartW=W-LABEL_W;
   const xFor=m=>LABEL_W+((m-rS)/range)*chartW;
+  // Inverse of xFor — pixel x back to a minute-of-day. Used by the click
+  // handler to work out which hour an empty-area tap lands on.
+  const minFor=x=>rS+((x-LABEL_W)/chartW)*range;
+
+  // Capture the geometry + every drawn bar for click hit-testing (Phase 6).
+  // Rebuilt on every render so it always matches what's on screen (view
+  // changes, data changes). Each bar records the room, the slot's ORIGINAL
+  // index into room.slots[day] (needed by openSlotModalEdit), and its pixel box.
+  tlHit = { LABEL_W, TOP_H, ROW_H, rS, rE, day, chartW, minFor, bars: [], rowCount: state.rooms.length };
 
   const ticks=range<=720?7:13;
   for (let i=0;i<ticks;i++) {
@@ -3682,14 +3799,39 @@ function renderTimeline() {
     if (room.override===true)  { ctx.fillStyle='rgba(240,160,48,0.1)';  ctx.fillRect(LABEL_W,y+2,chartW,ROW_H-4); }
     if (room.override===false) { ctx.fillStyle='rgba(224,80,80,0.1)';   ctx.fillRect(LABEL_W,y+2,chartW,ROW_H-4); }
 
-    (room.slots[day]||[]).forEach(sl => {
+    // Weekday for the day being drawn (day 0 = today, day 1 = tomorrow) — used
+    // to hide recurring instances that don't run on that day, matching the
+    // dashboard's slot filter.
+    const tlWeekday = (new Date().getDay() + day) % 7;
+    (room.slots[day]||[]).forEach((sl, origIdx) => {
+      if (sl.recurring && Array.isArray(sl.days) && sl.days.length && !sl.days.includes(tlWeekday)) return;
       const sM=toMins(sl.s), eM=toMins(sl.e);
       if (eM<=rS||sM>=rE) return;
       const cS=Math.max(sM,rS), cE=Math.min(eM,rE);
       const x1=xFor(cS), x2=xFor(cE);
       const barH=18, barY=y+(ROW_H-barH)/2;
-      ctx.fillStyle=room.override===true?'#f0a030':room.override===false?'#e05050':'#4a8fff';
-      ctx.beginPath(); ctx.roundRect(x1,barY,Math.max(x2-x1,3),barH,3); ctx.fill();
+      const barW=Math.max(x2-x1,3);
+      // Record for click hit-testing (Phase 6). origIdx is the index into the
+      // UNFILTERED room.slots[day], which is what openSlotModalEdit expects.
+      tlHit.bars.push({ roomId: room.id, origIdx, x1, x2: x1+barW, y1: barY, y2: barY+barH, recurring: !!sl.recurring });
+      // Bar colour: a manual room override (ON/OFF) is a room-wide state that
+      // wins for the whole row; otherwise colour by payment/recurring
+      // (green=paid, blue=unpaid, amber=recurring) — same scheme as the cards.
+      ctx.fillStyle = room.override===true ? '#f0a030'
+                    : room.override===false ? '#e05050'
+                    : slotPaymentHex(sl);
+      ctx.beginPath(); ctx.roundRect(x1,barY,barW,barH,3); ctx.fill();
+      // Partial-hour marker: a '*' centred on the bar when the booking doesn't
+      // fill whole clock hours (e.g. 14:00–14:30). Only drawn when the bar is
+      // wide enough to show it.
+      if (isPartialHourSlot(sl) && barW >= 10) {
+        ctx.fillStyle = '#1a1a2e';
+        ctx.font = 'bold 13px -apple-system,sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('*', x1 + barW/2, barY + barH/2 + 1);
+        ctx.textBaseline = 'alphabetic';
+      }
     });
 
     ctx.fillStyle=ls.on?'#f0a030':'rgba(255,255,255,0.12)';
@@ -3712,6 +3854,51 @@ function renderTimeline() {
   document.getElementById('tl-on').textContent=tlOn;
   document.getElementById('tl-slots').textContent=tlSlots;
   document.getElementById('tl-hours').textContent=(Math.round(tlMins/60*10)/10)+'h';
+}
+
+// Click / tap on the timeline canvas. Uses the geometry captured by the last
+// renderTimeline() (tlHit). A tap inside a slot bar opens that slot for editing;
+// a tap in a room's empty area snaps to the clicked clock hour and opens the
+// booking modal prefilled with that hour. Since the edit/add modals index into
+// r.slots[state.schedDay], we first align schedDay to the day the timeline is
+// showing (day 0 = today, day 1 = tomorrow) so the modal targets the right
+// bucket. Taps outside the chart area (labels/header) are ignored.
+function handleTimelineClick(ev) {
+  if (!tlHit) return;
+  const canvas = document.getElementById('tlCanvas');
+  const rect = canvas.getBoundingClientRect();
+  // Canvas is drawn at its intrinsic pixel size but may be displayed scaled by
+  // CSS width:100%; map the click back to canvas pixels.
+  const scaleX = canvas.width  / rect.width;
+  const scaleY = canvas.height / rect.height;
+  const px = (ev.clientX - rect.left) * scaleX;
+  const py = (ev.clientY - rect.top)  * scaleY;
+
+  // Which room row? Rows start at TOP_H, each ROW_H tall.
+  const rowIdx = Math.floor((py - tlHit.TOP_H) / tlHit.ROW_H);
+  if (rowIdx < 0 || rowIdx >= tlHit.rowCount) return;
+  if (px < tlHit.LABEL_W) return; // clicked the room-name label gutter
+
+  // Align the schedule day the modals read from to the timeline's day.
+  if (state.schedDay !== tlHit.day) setSchedDay(tlHit.day);
+
+  // 1. Bar hit? (edit)
+  const hitBar = tlHit.bars.find(b =>
+    px >= b.x1 && px <= b.x2 && py >= b.y1 && py <= b.y2);
+  if (hitBar) {
+    openSlotModalEdit(hitBar.roomId, hitBar.origIdx);
+    return;
+  }
+
+  // 2. Empty area → book the clicked clock hour on that room.
+  const room = state.rooms[rowIdx];
+  if (!room) return;
+  let mins = tlHit.minFor(px);
+  let hour = Math.floor(mins / 60);
+  hour = Math.max(0, Math.min(23, hour)); // clamp into the day
+  const startStr = String(hour).padStart(2, '0') + ':00';
+  const endStr   = String(hour + 1).padStart(2, '0') + ':00'; // hour+1 <= 24 → "24:00" only when hour=23
+  openSlotModal(room.id, { start: startStr, end: endStr === '24:00' ? '23:59' : endStr });
 }
 
 // ── Settings ─────────────────────────────────────────────────
@@ -4180,7 +4367,25 @@ function restoreFromFile(event) {
   const reader = new FileReader();
   reader.onload = function (e) {
     try {
-      const data = JSON.parse(e.target.result);
+      // Parse defensively. A backup exported by the app is plain JSON, but a
+      // file that's been through an editor/OS can pick up a UTF-8 BOM
+      // (\uFEFF) or stray leading/trailing whitespace, either of which makes
+      // JSON.parse throw the cryptic "Unexpected token … is not valid JSON".
+      // Strip the BOM + trim, then parse; on failure show a clear message
+      // (with a hint if the file looks like a zip / wrong file) instead of
+      // the raw engine error.
+      let raw = (e.target.result || '');
+      if (raw.charCodeAt(0) === 0xFEFF) raw = raw.slice(1); // strip BOM
+      raw = raw.trim();
+      let data;
+      try {
+        data = JSON.parse(raw);
+      } catch (parseErr) {
+        const looksBinary = /^PK\x03\x04/.test(raw) || raw.charCodeAt(0) === 0x37; // zip / 7z magic
+        throw new Error(looksBinary
+          ? 'This is not a Lights On data backup — it looks like a zip/archive. Pick the .json file exported by the app\u2019s Backup button.'
+          : 'Could not read this backup file — it isn\u2019t valid JSON. It may be corrupted, incomplete, or not a Lights On backup file.');
+      }
 
       // Validate it looks like a Lights On backup
       if (!data.profiles || !Array.isArray(data.profiles) || !data.roomsByProfile) {
@@ -4231,8 +4436,12 @@ function restoreFromFile(event) {
         if (r.slots) {
           r.slots[0] = normalizeSlots(r.slots[0]);
           r.slots[1] = normalizeSlots(r.slots[1]);
+          // Normalize payment flag on restored slots (old backups lack it).
+          r.slots[0].forEach(sl => { sl.paid = !!sl.paid; });
+          r.slots[1].forEach(sl => { sl.paid = !!sl.paid; });
         }
         if (!Array.isArray(r.recurringDefs)) r.recurringDefs = [];
+        r.recurringDefs.forEach(d => { d.paid = !!d.paid; });
       });
 
       // Persist and refresh
@@ -4661,6 +4870,10 @@ function applyUpdate() {
           <label class="modal-label" for="rec_phone">Phone</label>
           <input class="settings-input" id="rec_phone" placeholder="Optional — for WhatsApp reminder" style="font-family:inherit">
         </div>
+        <div class="modal-check-row">
+          <input type="checkbox" id="rec_paid">
+          <label class="modal-check-label" for="rec_paid">Payment received (marks as Paid)</label>
+        </div>
         <div class="modal-divider"></div>
         <button class="modal-save-btn" id="recSaveBtn" onclick="saveRecurringFromModal()">Add recurring slot</button>
         <button class="modal-cancel-btn" id="recCancelEditBtn" onclick="recClearForm()" style="display:none">Cancel edit</button>
@@ -4721,6 +4934,10 @@ function applyUpdate() {
         <div class="modal-row">
           <label class="modal-label" for="m_phone">Phone</label>
           <input class="settings-input" id="m_phone" placeholder="Optional — enables reminder button" style="font-family:inherit">
+        </div>
+        <div class="modal-check-row">
+          <input type="checkbox" id="m_paid">
+          <label class="modal-check-label" for="m_paid">Payment received (marks this booking as Paid)</label>
         </div>
         <div class="modal-divider"></div>
         <div style="font-size:11px;color:var(--muted);margin-bottom:8px">For repeating bookings, use "⟳ Manage recurring slots" on the room instead.</div>
