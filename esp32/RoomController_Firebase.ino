@@ -489,14 +489,25 @@ void parseSlots(int idx, String json) {
         String slotObj = json.substring(objStart, objEnd + 1);
         // Recurring flag
         isRecurring = slotObj.indexOf("\"recurring\":true") >= 0;
-        // Activated: activatedAt exists and is NOT null
+        // Activated: activatedAt exists and is NOT null. This is now the SINGLE
+        // source of truth for whether a slot drives the relay — for BOTH coded
+        // and code-less ("Auto") slots.
+        //
+        // Previously a slot with "code":null was force-activated here regardless
+        // of activatedAt. That made an "Auto" slot impossible to turn OFF from
+        // the app: the admin's Deactivate nulled activatedAt but the firmware
+        // re-activated it anyway. Now the PWA SEEDS activatedAt for a no-code
+        // slot at creation (so it's on by default) and CLEARS it on Deactivate,
+        // and the firmware simply honours that flag — so Deactivate actually
+        // holds the relay off.
+        //
+        // Upgrade note: an Auto slot written by an OLDER PWA (has "code":null
+        // but no activatedAt) will read as NOT activated until it's re-saved /
+        // rolled over by the new PWA, which seeds activatedAt. This is the
+        // intended co-upgrade behaviour (flash firmware + update PWA together).
         bool hasActivatedField = slotObj.indexOf("\"activatedAt\":") >= 0;
         bool activatedIsNull   = slotObj.indexOf("\"activatedAt\":null") >= 0;
         isActivated = (hasActivatedField && !activatedIsNull);
-        // Auto slot: code is explicitly null = no code required = always activated
-        // Missing code field OR code is a string = requires activation
-        bool codeIsNull = slotObj.indexOf("\"code\":null") >= 0;
-        if (codeIsNull) isActivated = true;
         // Expired flag — MUST be read back, otherwise every slot refresh
         // resets it to false and checkSchedules() re-marks it expired on the
         // next tick, spamming the log and re-writing Firebase every 10s.
@@ -849,16 +860,19 @@ void appendRecurringFromJson(const String &slotsJson, int targetWd, const String
         if (!dup && maskRunsOnDay(mask, targetWd)) {
           seenKeys += key;
           String codeField = "", bookedByField = "", phoneField = "";
+          bool hasCode = false;
           String c = extractStringField(obj, "code");
-          if (c.length() > 0) codeField = ",\"code\":\"" + c + "\"";
+          if (c.length() > 0) { codeField = ",\"code\":\"" + c + "\""; hasCode = true; }
           String bb = extractStringField(obj, "bookedBy");
           if (bb.length() > 0) bookedByField = ",\"bookedBy\":\"" + bb + "\"";
           String ph = extractStringField(obj, "phone");
           if (ph.length() > 0) phoneField = ",\"phone\":\"" + ph + "\"";
           if (!first) out += ",";
+          // No-code slot → seed activatedAt (auto-active); coded → null.
+          String activatedField = hasCode ? ",\"activatedAt\":null" : ",\"activatedAt\":1";
           out += "{\"s\":\"" + sStr + "\",\"e\":\"" + eStr + "\",\"recurring\":true" +
             codeField + bookedByField + phoneField + daysFieldFromMask(mask) +
-            ",\"date\":\"" + dateStr + "\",\"activatedAt\":null}";
+            ",\"date\":\"" + dateStr + "\"" + activatedField + "}";
           first = false;
         }
       }
@@ -875,17 +889,21 @@ String buildRecurringSlotJson(int roomIdx, int j, const String &base, const Stri
   snprintf(e, 6, "%02d:%02d", rooms[roomIdx].slots[j].eh, rooms[roomIdx].slots[j].em);
   String existingSlot = fbGet(base + "/slots/" + String(j));
   String codeField = "", bookedByField = "", phoneField = "";
+  bool hasCode = false;
   if (existingSlot != "error" && existingSlot != "null") {
     String c = extractStringField(existingSlot, "code");
-    if (c.length() > 0) codeField = ",\"code\":\"" + c + "\"";
+    if (c.length() > 0) { codeField = ",\"code\":\"" + c + "\""; hasCode = true; }
     String bb = extractStringField(existingSlot, "bookedBy");
     if (bb.length() > 0) bookedByField = ",\"bookedBy\":\"" + bb + "\"";
     String ph = extractStringField(existingSlot, "phone");
     if (ph.length() > 0) phoneField = ",\"phone\":\"" + ph + "\"";
   }
   String daysField = daysFieldFromMask(rooms[roomIdx].slots[j].daysMask);
+  // No-code slot → seed activatedAt (auto-active); coded slot → null (waits for
+  // activation). See buildDefSlotJson for the rationale.
+  String activatedField = hasCode ? ",\"activatedAt\":null" : ",\"activatedAt\":1";
   return "{\"s\":\"" + String(s) + "\",\"e\":\"" + String(e) + "\",\"recurring\":true" +
-    codeField + bookedByField + phoneField + daysField + ",\"date\":\"" + dateStr + "\",\"activatedAt\":null}";
+    codeField + bookedByField + phoneField + daysField + ",\"date\":\"" + dateStr + "\"" + activatedField + "}";
 }
 
 // Materialize a recurring DEFINITION (rooms[roomIdx].recurDefs[k]) into a
@@ -897,12 +915,19 @@ String buildDefSlotJson(int roomIdx, int k, const String &dateStr) {
   char s[6], e[6];
   snprintf(s, 6, "%02d:%02d", d.sh, d.sm);
   snprintf(e, 6, "%02d:%02d", d.eh, d.em);
-  String codeField = (strlen(d.code) > 0)     ? (",\"code\":\"" + String(d.code) + "\"") : "";
+  bool hasCode = strlen(d.code) > 0;
+  String codeField = hasCode ? (",\"code\":\"" + String(d.code) + "\"") : "";
   String bbField   = (strlen(d.bookedBy) > 0) ? (",\"bookedBy\":\"" + String(d.bookedBy) + "\"") : "";
   String phField   = (strlen(d.phone) > 0)    ? (",\"phone\":\"" + String(d.phone) + "\"") : "";
   String daysField = daysFieldFromMask(d.daysMask);
+  // No-code ("Auto") slots are active by default: seed a non-null activatedAt
+  // so the relay comes on for the window (parseSlots now keys purely on
+  // activatedAt, no longer force-activating on code:null). Coded slots reset to
+  // null so they wait for the QR PIN / admin Activate. Sentinel 1 = "activated,
+  // exact time unknown" — parseSlots only checks non-null.
+  String activatedField = hasCode ? ",\"activatedAt\":null" : ",\"activatedAt\":1";
   return "{\"s\":\"" + String(s) + "\",\"e\":\"" + String(e) + "\",\"recurring\":true" +
-    codeField + bbField + phField + daysField + ",\"date\":\"" + dateStr + "\",\"activatedAt\":null}";
+    codeField + bbField + phField + daysField + ",\"date\":\"" + dateStr + "\"" + activatedField + "}";
 }
 
 // today) — a slot created for today AFTER that first run must not be
@@ -986,8 +1011,12 @@ bool midnightRollover() {
             if (bb2.length() > 0) bookedByField2 = ",\"bookedBy\":\"" + bb2 + "\"";
             String ph2 = extractStringField(obj, "phone");
             if (ph2.length() > 0) phoneField2 = ",\"phone\":\"" + ph2 + "\"";
+            // No-code slot → seed activatedAt so it's auto-active after
+            // promotion; coded slot → null (re-activation required). Matches
+            // the new activatedAt-only rule in parseSlots.
+            String activatedField2 = (c2.length() > 0) ? ",\"activatedAt\":null" : ",\"activatedAt\":1";
             newTodayJson += "{\"s\":\"" + startStr + "\",\"e\":\"" + endStr + "\"" +
-              codeField2 + bookedByField2 + phoneField2 + ",\"date\":\"" + getDateStr() + "\",\"activatedAt\":null}";
+              codeField2 + bookedByField2 + phoneField2 + ",\"date\":\"" + getDateStr() + "\"" + activatedField2 + "}";
             first = false;
           }
         }

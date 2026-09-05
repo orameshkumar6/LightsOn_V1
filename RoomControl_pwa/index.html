@@ -1441,8 +1441,11 @@ function recClearForm() {
   document.getElementById('recFormTitle').textContent = 'Add recurring slot';
   document.getElementById('recSaveBtn').textContent = 'Add recurring slot';
   document.getElementById('recCancelEditBtn').style.display = 'none';
-  document.getElementById('rec_start').value = '09:00';
-  document.getElementById('rec_end').value   = '10:00';
+  // Default to the current clock hour (matches the add-slot modal) rather than
+  // a fixed 09:00–10:00. 23:00 clamps its end to 23:59 to stay within the day.
+  const curHour = new Date().getHours();
+  document.getElementById('rec_start').value = String(curHour).padStart(2, '0') + ':00';
+  document.getElementById('rec_end').value   = curHour >= 23 ? '23:59' : String(curHour + 1).padStart(2, '0') + ':00';
   document.getElementById('rec_code').value  = '';
   document.getElementById('rec_name').value  = '';
   document.getElementById('rec_phone').value = '';
@@ -1868,15 +1871,21 @@ async function saveSlotFromModal() {
     slot.paid = paid;
     slot.date = dateStr;
     slot.expired = false;
+    // A time/code change invalidates any prior activation. Re-seed it by the
+    // same rule new slots use: a no-code slot becomes auto-active, a coded slot
+    // resets to inactive (waits for PIN / Activate).
     if (timeChanged || codeChanged) {
-      slot.activatedAt = null;
-      slot.activatedBy = null;
+      const nowAuto = !slotCode;
+      slot.activatedAt = nowAuto ? Date.now() : null;
+      slot.activatedBy = nowAuto ? 'auto' : null;
       slot.attempts    = 0;
       slot.lockedUntil = null;
     }
     const savedRoomId = modalRoomId;
     const savedIdx    = editingSlotIdx;
     const resetActivation = timeChanged || codeChanged;
+    const reseedActivatedAt = slot.activatedAt;   // capture for the direct patch below
+    const reseedActivatedBy = slot.activatedBy;
     closeSlotModal();
     markRoomDirty(savedRoomId - 1);
     persist();
@@ -1885,22 +1894,31 @@ async function saveSlotFromModal() {
     // pushRoom()'s per-slot write intentionally excludes activation fields so
     // routine saves can't clobber a real activation from activate.html. When
     // this edit reset them, mirror editSlotCode()/deactivateSlot() with a
-    // direct patch, or the stale activation in Firebase syncs right back.
+    // direct patch, or the stale activation in Firebase syncs right back. For a
+    // no-code slot this writes the seeded auto-activation; for a coded slot it
+    // clears it.
     if (resetActivation) {
       await fbPatch(`/rooms/room${savedRoomId}/slots/${savedIdx}`, {
-        activatedAt: null, activatedBy: null, attempts: 0, lockedUntil: null
+        activatedAt: reseedActivatedAt, activatedBy: reseedActivatedBy, attempts: 0, lockedUntil: null
       }, p);
     }
     renderDashboard();
+    refreshTimelineIfVisible();
     showToast('✓ Slot updated');
     return;
   }
 
+  // No-code ("Auto") slots are active by default (the light comes on for their
+  // window without any code entry); coded slots start inactive and wait for the
+  // QR PIN / admin Activate. pushRoom's _fresh handling seeds the same thing to
+  // Firebase — set it here too so the dashboard shows it active immediately.
+  const autoActivate = !slotCode;
   r.slots[modalDay].push({
     s: s, e: e, recurring,
     code: slotCode,
     paid,
-    activatedAt: null, activatedBy: null,
+    activatedAt: autoActivate ? Date.now() : null,
+    activatedBy: autoActivate ? 'auto' : null,
     attempts: 0, lockedUntil: null, expired: false,
     _fresh: true,
     date: dateStr,
@@ -1913,6 +1931,7 @@ async function saveSlotFromModal() {
   persist();
   await pushRoom(savedRoomId - 1);
   renderDashboard();
+  refreshTimelineIfVisible();
   const codeMsg = !requireCode ? ' (auto)' : ` (code: ${slotCode})`;
   showToast((recurring ? '✓ Recurring' : '✓ One-time') + ' slot added' + codeMsg);
 }
@@ -1938,6 +1957,7 @@ async function toggleSlotPaid(roomId, slotIdx) {
   persist();
   await pushRoom(roomId - 1);
   renderDashboard();
+  refreshTimelineIfVisible();
   showToast(slot.paid ? '✓ Marked as paid' : 'Marked as unpaid');
 }
 
@@ -1980,6 +2000,7 @@ async function editSlotCode(roomId, slotIdx) {
     lockedUntil: null
   }, p);
   renderDashboard();
+  refreshTimelineIfVisible();
 }
 
 function toggleCodeInput(id, requireCode) {
@@ -2936,10 +2957,21 @@ async function pushRoom(idx, profile) {
     // actually activated. _fresh is set only at creation and cleared
     // right after this first push, so later edits never re-trigger it.
     if (sl._fresh) {
-      patch.activatedAt = null;
-      patch.activatedBy = null;
+      // A no-code ("Auto") slot is active by default: seed activatedAt so the
+      // relay comes on for its window and the dashboard shows it "✓ Active"
+      // with a Deactivate option. A coded slot starts NOT activated (waits for
+      // the QR PIN / admin Activate). If the slot was already deactivated
+      // locally (activatedAt null on a no-code slot the admin turned off before
+      // the first push), respect that rather than re-activating it.
+      const autoActive = !sl.code && sl.activatedAt !== null;
+      patch.activatedAt = autoActive ? (sl.activatedAt || Date.now()) : null;
+      patch.activatedBy = autoActive ? (sl.activatedBy || 'auto') : null;
       patch.attempts = 0;
       patch.lockedUntil = null;
+      // Mirror the seeded activation onto the local object so the dashboard
+      // reflects it immediately (and a reload before the next push keeps it).
+      sl.activatedAt = patch.activatedAt;
+      sl.activatedBy = patch.activatedBy;
       delete sl._fresh;
       persist(); // clear the marker in storage now — otherwise a reload
                  // before the next push would resurrect it and reset
@@ -3087,7 +3119,10 @@ function materializeRecurringSlot(def, dateStr) {
     bookedBy: def.bookedBy || null,
     phone: def.phone || null,
     paid: !!def.paid,
-    activatedAt: null, activatedBy: null,
+    // No-code recurring instances are auto-active (light on for their window
+    // each day); coded ones wait for activation. Matches one-time slot rule.
+    activatedAt: (def.code ? null : Date.now()),
+    activatedBy: (def.code ? null : 'auto'),
     attempts: 0, lockedUntil: null, expired: false,
     _fresh: true,
     date: dateStr
@@ -3256,7 +3291,16 @@ function setPanelTab(id, tab) {
   renderDashboard();
 }
 
-function setSchedDay(d) { state.schedDay = d; renderDashboard(); }
+function setSchedDay(d) { state.schedDay = d; renderDashboard(); refreshTimelineIfVisible(); }
+
+// After any slot change, the dashboard is always re-rendered, but the timeline
+// is a separate canvas that only redraws when explicitly told to. When a slot
+// is booked/edited/deleted from the timeline (or its tab is open), redraw it so
+// the change shows immediately instead of only after switching tabs.
+function refreshTimelineIfVisible() {
+  const tl = document.getElementById('page-timeline');
+  if (tl && tl.classList.contains('active')) renderTimeline();
+}
 
 // ── Overlap detection helpers ─────────────────────────────────
 function toMinsStr(t) { const [h,m]=t.split(':').map(Number); return h*60+m; }
@@ -3292,7 +3336,7 @@ async function deleteSlot(id, idx) {
   const r = state.rooms.find(x => x.id === id);
   r.slots[state.schedDay].splice(idx, 1);
   markRoomDirty(id-1);
-  persist(); await pushRoom(id-1); renderDashboard();
+  persist(); await pushRoom(id-1); renderDashboard(); refreshTimelineIfVisible();
 }
 
 function toggleDay(id, day) {

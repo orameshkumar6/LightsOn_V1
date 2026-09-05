@@ -386,11 +386,19 @@ function renderSlots() {
       const isCurrent  = toMins(sl.s) <= nm && toMins(sl.e) > nm;
       const isWaiting  = !isActive && !isExpired && !!sl.code && isCurrent;
 
-      const isAutoApproved = !sl.code; // no code = auto-approved slot
+      // A no-code slot is "Auto" — active by default with no PIN. But the admin
+      // can now DEACTIVATE it (activatedAt explicitly null), which holds the
+      // relay off; when that happens it's no longer auto-active. There's no code
+      // to enter, so a deactivated Auto slot is shown as an inert "Not active"
+      // state (no tap target) rather than "Auto active".
+      const isAutoApproved  = !sl.code && sl.activatedAt !== null; // auto-active
+      const isAutoDeactivated = !sl.code && sl.activatedAt === null; // admin turned it off
       let cardClass = 'slot-card';
       let dotClass  = 'slot-dot pending';
       let badge     = isAutoApproved
         ? `<span class="slot-status-badge" style="background:rgba(64,192,128,0.12);color:var(--green)">⚡ Auto</span>`
+        : isAutoDeactivated
+        ? `<span class="slot-status-badge" style="background:rgba(136,136,136,0.15);color:#888">Not active</span>`
         : `<span class="slot-status-badge badge-tap">Tap to activate</span>`;
 
       if (isActive || isAutoApproved) {
@@ -399,6 +407,10 @@ function renderSlots() {
         badge      = isAutoApproved
           ? `<span class="slot-status-badge" style="background:rgba(64,192,128,0.12);color:var(--green)">⚡ Auto active</span>`
           : `<span class="slot-status-badge badge-active">✓ Active</span>`;
+      } else if (isAutoDeactivated) {
+        // Turned off by the admin — inert, no PIN (there's no code to enter).
+        dotClass = 'slot-dot';
+        badge    = `<span class="slot-status-badge" style="background:rgba(136,136,136,0.15);color:#888">Not active</span>`;
       } else if (isExpired) {
         cardClass += ' locked';
         dotClass   = 'slot-dot locked';
@@ -412,8 +424,9 @@ function renderSlots() {
         badge      = `<span class="slot-status-badge badge-locked">🔒 Locked ${lockMins}min</span>`;
       }
 
-      // Auto-approved and expired slots don't need PIN pad
-      const onclick = (!isActive && !isLocked && !isAutoApproved && !isExpired)
+      // No PIN pad for: already-active, locked, auto-active, admin-deactivated
+      // (no code to enter), or expired slots.
+      const onclick = (!isActive && !isLocked && !isAutoApproved && !isAutoDeactivated && !isExpired)
         ? `onclick="selectSlot(${room.id}, ${si})"`
         : '';
 
