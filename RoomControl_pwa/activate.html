@@ -218,6 +218,87 @@ async function fbPut(path, value) {
   } catch(e) { return false; }
 }
 
+// PATCH selected children without replacing siblings.
+async function fbPatch(path, value) {
+  try {
+    const res = await fetch(FIREBASE_URL + PROFILE_PREFIX + path + '.json', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+      body: JSON.stringify(value)
+    });
+    return res.ok;
+  } catch(e) { return false; }
+}
+
+// Sync V2: append one slot change and advance /sync/meta/revision.
+// This page can run independently of the admin PWA, so the helper is kept
+// self-contained rather than depending on index.html's JS.
+function syncGenerationToday() {
+  const d = new Date();
+  return Number(String(d.getFullYear()) +
+    String(d.getMonth() + 1).padStart(2, '0') +
+    String(d.getDate()).padStart(2, '0'));
+}
+function syncBucketName(bucket) { return bucket === 'slotsT' ? 'tomorrow' : 'today'; }
+function syncRoomId(roomKey) {
+  const m = String(roomKey || '').match(/room(\d+)/);
+  return m ? Number(m[1]) : String(roomKey || '');
+}
+async function appendSlotSyncChange(roomKey, bucket, slotId, operation, slotPatch) {
+  try {
+    const generation = syncGenerationToday();
+    let meta = await fbGet('/sync/meta');
+    if (!meta || Number(meta.generation) !== generation) {
+      meta = { schemaVersion: 2, generation, revision: 1, resetAt: Date.now(), resetReason: 'activate_page' };
+      const ok = await fbPatch('/', {
+        'sync/meta': meta,
+        'sync/changes': { '1': { type: 'FULL_SYNC', reason: 'activate_page', generation, updatedAt: Date.now() } }
+      });
+      if (!ok) return false;
+    }
+    const revision = Number(meta.revision || 1) + 1;
+    const updatedAt = Date.now();
+    const canonicalBucket = syncBucketName(bucket);
+    const roomId = syncRoomId(roomKey);
+    const recordPath = `slotRecords/${roomKey}/${canonicalBucket}/${slotId}`;
+    const changePath = `sync/changes/${revision}`;
+    const rootPatch = {};
+    if (slotPatch) {
+      Object.keys(slotPatch).forEach(k => { rootPatch[`${recordPath}/${k}`] = slotPatch[k]; });
+      rootPatch[`${recordPath}/id`] = slotId;
+      rootPatch[`${recordPath}/slotTs`] = updatedAt;
+      rootPatch[`${recordPath}/updatedAt`] = updatedAt;
+    }
+    rootPatch[changePath] = {
+      entity: 'slot', operation: operation || 'update', roomId,
+      bucket: canonicalBucket, recordId: slotId, revision, generation, updatedAt
+    };
+    rootPatch['sync/meta/revision'] = revision;
+    rootPatch['sync/meta/updatedAt'] = updatedAt;
+    return await fbPatch('/', rootPatch);
+  } catch(e) {
+    console.warn('Sync V2 change write failed', e);
+    return false;
+  }
+}
+
+// Freshly resolves a slot's CURRENT index + data in Firebase by its stable
+// id, instead of trusting an index captured at page-load time. A slot's id
+// never changes; its position can — both from this page's own array
+// filtering (a tombstoned/malformed slot ahead of it) and from a genuine
+// edit landing on that room between page load and this exact call. Every
+// write/verify that targets a specific slot goes through this rather than
+// origIdx. Returns {idx:-1, slot:null} if the slot can no longer be found
+// (deleted, or moved to a bucket this call isn't looking in).
+async function findSlotById(roomKey, bucket, slotId) {
+  const raw = await fbGet(`/rooms/${roomKey}/${bucket}`);
+  let arr = [];
+  if (Array.isArray(raw)) arr = raw;
+  else if (raw) arr = Object.keys(raw).sort((a,b)=>parseInt(a)-parseInt(b)).map(k => raw[k]);
+  const idx = arr.findIndex(s => s && s.id === slotId);
+  return { idx, slot: idx >= 0 ? arr[idx] : null };
+}
+
 // ── Load today's slots ────────────────────────────────────────
 // Returns true if user is actively interacting — don't interrupt
 function userIsBusy() {
@@ -302,21 +383,30 @@ async function loadSlots() {
       // slot (see index.html's deleteSlot()) must never be offered for
       // activation even though it's still present in Firebase awaiting the
       // next rollover's permanent purge.
-      const slots = slotsArr.filter(s => s && s.s && s.e && !s.deleted);
+      // origIdx (this slot's position at load time) is kept only as a
+      // reference/debugging hint now — every write or re-check that targets
+      // a specific slot uses findSlotById() instead, a fresh lookup by the
+      // slot's stable id. That's what actually matters: an index can shift
+      // both from this page's own filtering (a tombstoned/malformed slot
+      // ahead of it) and from a genuine edit landing on the room between
+      // page load and whenever the write actually happens.
+      const slots = slotsArr
+        .map((s, i) => ({ s, origIdx: i }))
+        .filter(({ s }) => s && s.s && s.e && !s.deleted);
 
-      // Carries a slot's Firebase bucket + index along so activation writes
-      // and the "preserve state from the previous load" match below can
-      // target the right node — origIdx alone collides between /slots and
-      // /slotsT (both are 0-based arrays).
+      // Carries a slot's Firebase bucket along so activation writes and the
+      // "preserve state from the previous load" match below can target the
+      // right node.
       const buildMerged = (sl, originalIndex, bucket) => {
         const mergedSlot = { ...sl, origIdx: originalIndex, roomKey: key, bucket };
         // Preserve activation state from previous allRooms if Firebase returns null.
-        // Match by room + bucket + origIdx for exact slot identification —
-        // prevents wrong slot's activation being applied to a different slot.
+        // Match by id (stable across reloads, unlike position) + bucket for
+        // exact slot identification — prevents wrong slot's activation being
+        // applied to a different slot.
         if (!mergedSlot.activatedAt) {
           const prevRoom = prevAllRooms.find(r => r.id === roomId);
           const prevSlot = prevRoom && prevRoom.slots.find(
-            ps => ps.origIdx === originalIndex && (ps.bucket || 'slots') === bucket
+            ps => ps.id === sl.id && (ps.bucket || 'slots') === bucket
           );
           if (prevSlot && prevSlot.activatedAt) {
             mergedSlot.activatedAt = prevSlot.activatedAt;
@@ -328,7 +418,7 @@ async function loadSlots() {
 
       // Show all of today's slots not yet ended, and starting within the window.
       const todaySlots = [];
-      slots.forEach((sl, originalIndex) => {
+      slots.forEach(({ s: sl, origIdx }) => {
         if (sl.date === tomorrowStr()) return; // skip tomorrow — handled from /slotsT below
         if (toMins(sl.e) <= nm) return;        // skip ended
         if (toMins(sl.s) > windowEndMins) return; // skip slots starting beyond the configured window
@@ -336,7 +426,7 @@ async function loadSlots() {
         // on its configured weekdays. No days list (or non-recurring) = every day.
         if (sl.recurring && Array.isArray(sl.days) && sl.days.length &&
             !sl.days.includes(new Date().getDay())) return;
-        todaySlots.push(buildMerged(sl, originalIndex, 'slots'));
+        todaySlots.push(buildMerged(sl, origIdx, 'slots'));
       });
 
       // The lookahead window can reach past midnight (e.g. it's 23:00 with a
@@ -351,12 +441,16 @@ async function loadSlots() {
         if (Array.isArray(rawSlotsT)) slotsTArr = rawSlotsT;
         else if (rawSlotsT) slotsTArr = Object.keys(rawSlotsT).sort((a,b)=>parseInt(a)-parseInt(b)).map(k => rawSlotsT[k]);
         const tomorrowWd = (new Date().getDay() + 1) % 7;
-        slotsTArr.filter(s => s && s.s && s.e && !s.deleted).forEach((sl, originalIndex) => {
-          if (toMins(sl.s) > wrappedEndMins) return; // starts beyond the window's tomorrow portion
-          if (sl.recurring && Array.isArray(sl.days) && sl.days.length &&
-              !sl.days.includes(tomorrowWd)) return;
-          todaySlots.push(buildMerged(sl, originalIndex, 'slotsT'));
-        });
+        // Same true-index-before-filtering requirement as the /slots block above.
+        slotsTArr
+          .map((s, i) => ({ s, origIdx: i }))
+          .filter(({ s }) => s && s.s && s.e && !s.deleted)
+          .forEach(({ s: sl, origIdx }) => {
+            if (toMins(sl.s) > wrappedEndMins) return; // starts beyond the window's tomorrow portion
+            if (sl.recurring && Array.isArray(sl.days) && sl.days.length &&
+                !sl.days.includes(tomorrowWd)) return;
+            todaySlots.push(buildMerged(sl, origIdx, 'slotsT'));
+          });
       }
 
       if (todaySlots.length > 0) {
@@ -388,10 +482,11 @@ async function verifyAndRender() {
       const isCurrent = sl.bucket !== 'slotsT' && toMins(sl.s) <= nm && toMins(sl.e) > nm;
       if (!isCurrent || sl.activatedAt || !sl.code) continue;
 
-      // Fetch latest activatedAt directly from Firebase
-      const val = await fbGet(`/rooms/${sl.roomKey}/${sl.bucket || 'slots'}/${sl.origIdx}/activatedAt`);
-      if (val && val !== null) {
-        sl.activatedAt = val; // update local — slot IS activated
+      // Fetch latest activatedAt directly from Firebase — by id, not the
+      // index captured at load time (see findSlotById()).
+      const { slot: freshSlot } = await findSlotById(sl.roomKey, sl.bucket || 'slots', sl.id);
+      if (freshSlot && freshSlot.activatedAt) {
+        sl.activatedAt = freshSlot.activatedAt; // update local — slot IS activated
         needsRerender = true;
       }
     }
@@ -557,11 +652,24 @@ async function pinSubmit() {
   try {
     if (isAdmin || isSlot) {
       // ── Correct code ─────────────────────────────────────────
+      // Resolve this slot's CURRENT index fresh, by id, right before
+      // writing — never trust origIdx here (see findSlotById()). If the
+      // slot can no longer be found (deleted/moved since this page loaded),
+      // bail out with an error instead of silently activating whatever now
+      // happens to sit at a stale index.
+      const bucket = selectedSlot.bucket || 'slots';
+      const { idx: freshIdx } = await findSlotById(selectedSlot.roomKey, bucket, selectedSlot.id);
+      if (freshIdx < 0) {
+        updatePinDots('error');
+        document.getElementById('pinError').textContent = 'This slot is no longer available — please refresh.';
+        setTimeout(() => { pinValue = ''; updatePinDots(); loadSlots(); }, 800);
+        return;
+      }
       updatePinDots('ok');
 
       // Write activatedAt to Firebase — bucket is 'slots' or 'slotsT'
       // depending on which one this slot was loaded from (see loadSlots).
-      const slotBasePath = `/rooms/${selectedSlot.roomKey}/${selectedSlot.bucket || 'slots'}/${selectedSlot.origIdx}`;
+      const slotBasePath = `/rooms/${selectedSlot.roomKey}/${bucket}/${freshIdx}`;
       // Bump slotsUpdatedAt too — the marker the ESP32's refreshSlotsOnly()
       // checks before paying for the full /slots download (see
       // writeRoomSlots() in index.html for the full reasoning). Only for
@@ -571,13 +679,24 @@ async function pinSubmit() {
       // marker having already moved just costs one extra full re-read next
       // cycle, never a missed one — the direction that matters here, since
       // this is literally the write that turns the light on.
-      if ((selectedSlot.bucket || 'slots') !== 'slotsT') {
+      if (bucket !== 'slotsT') {
         await fbPut(`/rooms/${selectedSlot.roomKey}/slotsUpdatedAt`, Date.now());
       }
-      await fbPut(slotBasePath + '/activatedAt', Date.now());
-      await fbPut(slotBasePath + '/activatedBy', isAdmin ? 'admin' : 'slot');
-      await fbPut(slotBasePath + '/attempts',    0);
-      await fbPut(slotBasePath + '/lockedUntil', null);
+      const activatedAt = Date.now();
+      const activatedBy = isAdmin ? 'admin' : 'slot';
+      const a1 = await fbPut(slotBasePath + '/activatedAt', activatedAt);
+      const a2 = await fbPut(slotBasePath + '/activatedBy', activatedBy);
+      const a3 = await fbPut(slotBasePath + '/attempts',    0);
+      const a4 = await fbPut(slotBasePath + '/lockedUntil', null);
+      if (!(a1 && a2 && a3 && a4)) throw new Error('Activation write failed');
+
+      // Write the canonical ID-keyed state and bump Sync V2 revision so the
+      // ESP32 retrieves exactly this changed slot on its next delta poll.
+      const syncOk = await appendSlotSyncChange(
+        selectedSlot.roomKey, bucket, selectedSlot.id, 'update',
+        { activatedAt, activatedBy, attempts: 0, lockedUntil: null, expired: false }
+      );
+      if (!syncOk) throw new Error('Activation sync record failed');
 
       // Close PIN, show success, then full refresh
       document.getElementById('pinOverlay').classList.remove('show');
@@ -599,15 +718,27 @@ async function pinSubmit() {
       // ── Wrong code ───────────────────────────────────────────
       updatePinDots('error');
 
-      const slotPath2 = `/rooms/${selectedSlot.roomKey}/${selectedSlot.bucket || 'slots'}/${selectedSlot.origIdx}`;
-      // Read current attempts count directly
-      const currentAttempts = await fbGet(slotPath2 + '/attempts') || 0;
+      // Same fresh by-id lookup as the success branch — and since
+      // findSlotById() already returns the full slot, its attempts count
+      // comes along for free without a second fetch.
+      const bucket2 = selectedSlot.bucket || 'slots';
+      const { idx: freshIdx2, slot: freshSlot2 } = await findSlotById(selectedSlot.roomKey, bucket2, selectedSlot.id);
+      if (freshIdx2 < 0) {
+        document.getElementById('pinError').textContent = 'This slot is no longer available — please refresh.';
+        setTimeout(() => { pinValue = ''; updatePinDots(); loadSlots(); }, 800);
+        return;
+      }
+      const slotPath2 = `/rooms/${selectedSlot.roomKey}/${bucket2}/${freshIdx2}`;
+      const currentAttempts = freshSlot2.attempts || 0;
       const attempts = currentAttempts + 1;
-      await fbPut(slotPath2 + '/attempts', attempts);
+      const attemptsOk = await fbPut(slotPath2 + '/attempts', attempts);
+      if (!attemptsOk) throw new Error('Attempt counter write failed');
 
+      let lockUntil = null;
       if (attempts >= 3) {
-        const lockUntil = Date.now() + 5 * 60 * 1000;
-        await fbPut(slotPath2 + '/lockedUntil', lockUntil);
+        lockUntil = Date.now() + 5 * 60 * 1000;
+        const lockOk = await fbPut(slotPath2 + '/lockedUntil', lockUntil);
+        if (!lockOk) throw new Error('Lock write failed');
         setTimeout(() => {
           document.getElementById('pinOverlay').classList.remove('show');
           pinValue = ''; updatePinDots(); loadSlots();
@@ -618,6 +749,12 @@ async function pinSubmit() {
         document.getElementById('pinError').textContent =
           `Wrong code — ${3 - attempts} attempt${3-attempts===1?'':'s'} remaining`;
       }
+
+      const attemptSyncOk = await appendSlotSyncChange(
+        selectedSlot.roomKey, bucket2, selectedSlot.id, 'update',
+        { attempts, lockedUntil }
+      );
+      if (!attemptSyncOk) throw new Error('Attempt sync record failed');
 
       setTimeout(() => { pinValue = ''; updatePinDots(); }, 600);
     }

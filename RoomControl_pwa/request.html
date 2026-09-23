@@ -199,6 +199,45 @@ async function fbPatch(path, value) {
   } catch(e) { return false; }
 }
 
+// ── Sync V2: publish an auto-approved slot creation ───────────
+function syncGenerationToday() {
+  const d = new Date();
+  return Number(String(d.getFullYear()) + String(d.getMonth()+1).padStart(2,'0') + String(d.getDate()).padStart(2,'0'));
+}
+function syncBucketName(dayIdx) { return dayIdx === 0 ? 'today' : 'tomorrow'; }
+async function publishAutoApprovedSlotSync(roomId, dayIdx, slot) {
+  try {
+    const generation = syncGenerationToday();
+    let meta = await fbGet('/sync/meta');
+    if (!meta || Number(meta.generation) !== generation) {
+      meta = { schemaVersion: 2, generation, revision: 1, resetAt: Date.now(), resetReason: 'request_page' };
+      const baselineOk = await fbPatch('/', {
+        'sync/meta': meta,
+        'sync/changes': { '1': { type: 'FULL_SYNC', reason: 'request_page', generation, updatedAt: Date.now() } }
+      });
+      if (!baselineOk) return false;
+    }
+    const revision = Number(meta.revision || 1) + 1;
+    const now = Date.now();
+    const bucket = syncBucketName(dayIdx);
+    const canonical = { ...slot, id: slot.id, version: Number(slot.version || 0) + 1,
+      slotTs: now, updatedAt: now, deleted: false };
+    const rootPatch = {};
+    rootPatch[`slotRecords/room${roomId}/${bucket}/${slot.id}`] = canonical;
+    rootPatch[`sync/changes/${revision}`] = {
+      entity: 'slot', operation: 'create', roomId, bucket,
+      recordId: slot.id, version: canonical.version,
+      revision, generation, updatedAt: now
+    };
+    rootPatch['sync/meta/revision'] = revision;
+    rootPatch['sync/meta/updatedAt'] = now;
+    return await fbPatch('/', rootPatch);
+  } catch (e) {
+    console.warn('Auto-approval Sync V2 write failed', e);
+    return false;
+  }
+}
+
 function makeRequestId() {
   return 'req_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
 }
@@ -424,6 +463,11 @@ async function tryAutoApprove(id, room, opt, reqObj) {
     ? await fbPatch('/rooms/room' + room.id, { [`slots/${arr.length}`]: newSlot, slotsUpdatedAt: Date.now() })
     : await fbPut(bucketPath + '/' + arr.length, newSlot);
   if (!ok) return false;
+
+  // A confirmed auto-approval is a real schedule mutation. Publish the
+  // ID-keyed canonical slot and CREATE delta before confirming the request.
+  const syncOk = await publishAutoApprovedSlotSync(room.id, opt.dayIdx, newSlot);
+  if (!syncOk) return false;
 
   await fbPut('/requests/' + id, {
     ...reqObj, status: 'confirmed', confirmedAt: Date.now(),

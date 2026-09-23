@@ -1457,7 +1457,7 @@ async function confirmBookingImport() {
     await pushRoom(r.id - 1); // same write path Add Slot already uses — s/e/recurring/code/date only
     renderDashboard();
 
-    bookingLastResult = { roomId: r.id, slotIdx: r.slots[0].length - 1 };
+    bookingLastResult = { roomId: r.id, slotId: slot.id };
     document.getElementById('bkResultMsg').textContent =
       `${r.name} · ${start}–${end} · code ${code}` + (name ? ` · ${name}` : '');
     document.getElementById('bkWhatsAppBtn').style.display = phone ? '' : 'none';
@@ -1472,10 +1472,11 @@ async function confirmBookingImport() {
 // uses — see sendSlotWhatsAppReminder().
 function sendBookingWhatsApp() {
   if (!bookingLastResult) { showToast('No phone number to message'); return; }
-  sendSlotWhatsAppReminder(bookingLastResult.roomId, bookingLastResult.slotIdx);
+  const r = state.rooms.find(room => room.id === bookingLastResult.roomId);
+  const slot = r && (r.slots[0] || []).find(item => item && item.id === bookingLastResult.slotId);
+  if (!r || !slot) { showToast('Booking no longer exists locally'); return; }
+  sendSlotWhatsApp(r, slot);
 }
-
-
 
 // ── Recurring Slots management modal ──────────────────────────
 // This modal manages the room's authoritative recurring DEFINITIONS
@@ -1615,6 +1616,8 @@ async function deleteRecurringDef(defId) {
   r.slots[1] = normalizeSlots(r.slots[1]).filter(sl => !matches(sl));
   markRoomDirty(r.id - 1);
   persist();
+  const defSync = await publishRecurringDefSyncV2(r.id, d, 'delete', getActiveProfile());
+  if (!defSync) { showToast('⚠️ Could not publish recurring delete sync'); return; }
   await pushRoom(r.id - 1);
   if (recModalRoomId) { recClearForm(); renderRecDefList(); }
   renderDashboard();
@@ -1650,12 +1653,21 @@ async function saveRecurringFromModal() {
   recSaveInFlight = true;
   try {
     if (!Array.isArray(r.recurringDefs)) r.recurringDefs = [];
+    let recurringOperation = 'create';
+    let changedDef = null;
     if (recEditingDefId) {
       const d = r.recurringDefs.find(x => x.id === recEditingDefId);
-      if (d) { d.s = s; d.e = e; d.days = days; d.code = code; d.bookedBy = bookedBy; d.phone = phone; d.paid = paid; }
+      if (d) {
+        d.s = s; d.e = e; d.days = days; d.code = code;
+        d.bookedBy = bookedBy; d.phone = phone; d.paid = paid;
+        changedDef = d;
+        recurringOperation = 'update';
+      }
     } else {
-      r.recurringDefs.push({ id: makeRecurDefId(), s, e, days, code, bookedBy, phone, paid });
+      changedDef = { id: makeRecurDefId(), s, e, days, code, bookedBy, phone, paid };
+      r.recurringDefs.push(changedDef);
     }
+    if (!changedDef) throw new Error('Recurring definition not found');
 
     // Re-materialize today/tomorrow from the current defs so this change is
     // reflected immediately (add shows now; edit updates the instances). Keeps
@@ -1664,6 +1676,11 @@ async function saveRecurringFromModal() {
 
     markRoomDirty(r.id - 1);
     persist();
+    const syncedDef = await publishRecurringDefSyncV2(
+      r.id, changedDef, recurringOperation, getActiveProfile()
+    );
+    if (!syncedDef) throw new Error('Recurring definition sync failed');
+    Object.assign(changedDef, syncedDef);
     await pushRoom(r.id - 1);
     recClearForm();
     renderRecDefList();
@@ -1693,7 +1710,9 @@ function rematerializeRecurringBuckets(r) {
 // ── Slot Modal ────────────────────────────────────────────────
 let modalRoomId  = null;
 let modalDay     = 0;
-let editingSlotIdx = null; // null = adding a new slot; a number = editing that slot index
+let editingSlotIdx = null; // UI-only position; never used as Firebase identity
+let editingSlotId  = null; // stable slot identity loaded into the modal
+let editingSlotTs  = null; // Firebase version loaded into the modal
 
 // ── Day-view 1-hour time picker (inside the slot modal) ────────
 // Blocks are whole clock hours (00:00, 01:00, … 23:00) — 24 in total. A single
@@ -1830,6 +1849,8 @@ function openSlotModal(roomId, opts) {
   if (!requireLicense('add a slot')) return;
   opts = opts || {};
   editingSlotIdx = null; // add mode
+  editingSlotId = null;
+  editingSlotTs = null;
   modalRoomId = roomId;
   modalDay    = state.schedDay;
   const r     = state.rooms.find(x => x.id === roomId);
@@ -1871,7 +1892,9 @@ function openSlotModalEdit(roomId, slotIdx) {
   const slot = (r.slots[state.schedDay] || [])[slotIdx];
   if (!slot) { showToast('Slot not found'); return; }
 
-  editingSlotIdx = slotIdx; // edit mode
+  editingSlotIdx = slotIdx; // UI-only position
+  editingSlotId = slot.id;
+  editingSlotTs = slot.slotTs;
   modalRoomId = roomId;
   modalDay    = state.schedDay;
   document.getElementById('modalTitle').textContent = 'Edit Slot — ' + r.name;
@@ -1901,8 +1924,9 @@ function closeSlotModal() {
   document.getElementById('slotModal').classList.remove('show');
   modalRoomId = null;
   editingSlotIdx = null;
+  editingSlotId = null;
+  editingSlotTs = null;
 }
-
 function modalBackdropClick(e) {
   if (e.target.id === 'slotModal') closeSlotModal();
 }
@@ -1978,113 +2002,76 @@ async function saveSlotFromModal() {
   const r = state.rooms.find(x => x.id === modalRoomId);
   const s = document.getElementById('m_start').value;
   const e = document.getElementById('m_end').value;
-
   if (!s || !e || s >= e) { showToast('⚠️ Invalid time range'); return; }
 
-  // Check for duplicate slot times — when editing, ignore the slot being edited
   const existing = r.slots[modalDay] || [];
-  const dup = existing.find((sl, idx) => !sl.deleted && sl.s === s && sl.e === e && !(isEdit && idx === editingSlotIdx));
+  const dup = existing.find(sl => sl && !sl.deleted && sl.s === s && sl.e === e &&
+    !(isEdit && sl.id === editingSlotId));
   if (dup) { showToast('⚠️ Slot already exists'); return; }
 
-  const requireCode  = document.getElementById('m_reqcode').checked;
-  const codeInput    = document.getElementById('m_code').value.trim();
-  const slotCode     = requireCode
+  const requireCode = document.getElementById('m_reqcode').checked;
+  const codeInput = document.getElementById('m_code').value.trim();
+  const slotCode = requireCode
     ? (codeInput.length === 4 && /^[0-9]{4}$/.test(codeInput) ? codeInput : generate4DigitCode())
     : null;
-  const recurring    = false; // add-slot creates one-time slots only; recurring is managed separately
-  const bookedBy     = document.getElementById('m_name').value.trim() || null;
-  const phone        = document.getElementById('m_phone').value.trim() || null;
-  const paidEl       = document.getElementById('m_paid');
-  const paid         = paidEl ? !!paidEl.checked : false; // default unpaid
-
-  // Build date string
+  const recurring = false;
+  const bookedBy = document.getElementById('m_name').value.trim() || null;
+  const phone = document.getElementById('m_phone').value.trim() || null;
+  const paidEl = document.getElementById('m_paid');
+  const paid = paidEl ? !!paidEl.checked : false;
   let dateStr;
-  if (modalDay === 0) {
-    dateStr = todayStr();
-  } else {
-    const d = new Date(); d.setDate(d.getDate()+1);
-    dateStr = d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+  if (modalDay === 0) dateStr = todayStr();
+  else {
+    const d = new Date(); d.setDate(d.getDate() + 1);
+    dateStr = d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
   }
-
   if (!r.slots[modalDay]) r.slots[modalDay] = [];
 
   if (isEdit) {
-    const slot = r.slots[modalDay][editingSlotIdx];
-    if (!slot) { showToast('Slot not found'); closeSlotModal(); return; }
-    // Changing the time or the code invalidates any prior activation, so
-    // reset the activation state (same fields editSlotCode() clears) when
-    // any of those change. Otherwise leave a live activation untouched.
-    const timeChanged = slot.s !== s || slot.e !== e;
-    const codeChanged = (slot.code || null) !== (slotCode || null);
-    slot.s = s;
-    slot.e = e;
-    slot.recurring = recurring;
-    slot.code = slotCode;
-    slot.bookedBy = bookedBy;
-    slot.phone = phone;
-    slot.paid = paid;
-    slot.date = dateStr;
-    slot.expired = false;
-    // A time/code change invalidates any prior activation. Re-seed it by the
-    // same rule new slots use: a no-code slot becomes auto-active, a coded slot
-    // resets to inactive (waits for PIN / Activate).
+    const slotId = editingSlotId;
+    const expectedSlotTs = editingSlotTs;
+    const localSlot = (r.slots[modalDay] || []).find(slot => slot && slot.id === slotId);
+    if (!localSlot) { showToast('Slot not found locally — please Sync'); return; }
+
+    const timeChanged = localSlot.s !== s || localSlot.e !== e;
+    const codeChanged = (localSlot.code || null) !== (slotCode || null);
+    const changes = { s, e, recurring, code: slotCode, bookedBy, phone, paid, date: dateStr, expired: false };
     if (timeChanged || codeChanged) {
-      const nowAuto = !slotCode;
-      slot.activatedAt = nowAuto ? Date.now() : null;
-      slot.activatedBy = nowAuto ? 'auto' : null;
-      slot.attempts    = 0;
-      slot.lockedUntil = null;
+      const autoActivate = !slotCode;
+      changes.activatedAt = autoActivate ? Date.now() : null;
+      changes.activatedBy = autoActivate ? 'auto' : null;
+      changes.attempts = 0;
+      changes.lockedUntil = null;
     }
-    const savedRoomId = modalRoomId;
-    const savedIdx    = editingSlotIdx;
-    const savedDay    = modalDay; // bucket this slot lives in (for the pay flow below)
-    const resetActivation = timeChanged || codeChanged;
+
+    const roomId = modalRoomId;
+    const day = modalDay;
+    const bucket = day === 0 ? 'slots' : 'slotsT';
+    const result = await updateSlotById(roomId, slotId, expectedSlotTs, changes, bucket, getActiveProfile());
+    if (!result.ok) { showSlotUpdateError(result, 'saving'); return; }
+
+    const localIdx = (r.slots[day] || []).findIndex(slot => slot && slot.id === slotId);
+    if (localIdx >= 0) r.slots[day][localIdx] = { ...result.slot };
     closeSlotModal();
-    markRoomDirty(savedRoomId - 1);
     persist();
-    const p = getActiveProfile(); // pin once — same db for both writes below
-    await pushRoom(savedRoomId - 1, p);
-    // pushRoom()'s per-slot write intentionally excludes activation fields so
-    // routine saves can't clobber a real activation from activate.html. When
-    // this edit reset them, mirror editSlotCode()/deactivateSlot() with a
-    // direct write of the full slot (via writeRoomSlots(), so this also bumps
-    // slotsUpdatedAt), or the stale activation in Firebase syncs right back.
-    // For a no-code slot this writes the seeded auto-activation; for a coded
-    // slot it clears it.
-    if (resetActivation) {
-      await writeRoomSlots(savedRoomId, { [savedIdx]: { ...slot } }, p);
-    }
     renderDashboard();
     refreshTimelineIfVisible();
     showToast('✓ Slot updated');
-    // If the saved slot is Paid, offer to send a WhatsApp confirmation (same as
-    // the dashboard chip flow). Unpaid saves never prompt. Only for one-time
-    // slots (recurring isn't payment-colour-coded / this modal edits one-time).
-    if (paid && !recurring) maybeSendPaidConfirmation(savedRoomId, savedIdx, savedDay);
+    if (paid && !recurring) maybeSendPaidConfirmationById(roomId, slotId, day);
     return;
   }
 
-  // No-code ("Auto") slots are active by default (the light comes on for their
-  // window without any code entry); coded slots start inactive and wait for the
-  // QR PIN / admin Activate. pushRoom's _fresh handling seeds the same thing to
-  // Firebase — set it here too so the dashboard shows it active immediately.
   const autoActivate = !slotCode;
-  r.slots[modalDay].push({
-    id: makeSlotId(),
-    s: s, e: e, recurring,
-    code: slotCode,
-    paid,
+  const newSlot = {
+    id: makeSlotId(), s, e, recurring, code: slotCode, paid,
     activatedAt: autoActivate ? Date.now() : null,
     activatedBy: autoActivate ? 'auto' : null,
     attempts: 0, lockedUntil: null, expired: false,
-    _fresh: true,
-    date: dateStr,
-    bookedBy, phone
-  });
-
-  const savedRoomId = modalRoomId; // save before closeSlotModal clears it
-  const savedIdx    = r.slots[modalDay].length - 1; // index of the just-added slot
-  const savedDay    = modalDay;
+    _fresh: true, date: dateStr, bookedBy, phone
+  };
+  r.slots[modalDay].push(newSlot);
+  const savedRoomId = modalRoomId;
+  const savedDay = modalDay;
   closeSlotModal();
   markRoomDirty(savedRoomId - 1);
   persist();
@@ -2092,10 +2079,8 @@ async function saveSlotFromModal() {
   renderDashboard();
   refreshTimelineIfVisible();
   const codeMsg = !requireCode ? ' (auto)' : ` (code: ${slotCode})`;
-  showToast((recurring ? '✓ Recurring' : '✓ One-time') + ' slot added' + codeMsg);
-  // If the new slot was created Paid, offer the WhatsApp confirmation — same as
-  // the edit-save and chip flows. Unpaid never prompts; recurring is excluded.
-  if (paid && !recurring) maybeSendPaidConfirmation(savedRoomId, savedIdx, savedDay);
+  showToast('✓ One-time slot added' + codeMsg);
+  if (paid) maybeSendPaidConfirmationById(savedRoomId, newSlot.id, savedDay);
 }
 
 // Delete the slot currently open in the edit modal. Only reachable in edit mode
@@ -2105,18 +2090,19 @@ async function saveSlotFromModal() {
 // state.schedDay — the edit flow keeps those aligned (dashboard edit uses the
 // current schedDay; a timeline edit set schedDay to the bar's bucket).
 async function deleteSlotFromModal() {
-  if (editingSlotIdx === null || !modalRoomId) return;
-  const r = state.rooms.find(x => x.id === modalRoomId);
-  const slot = r && (r.slots[modalDay] || [])[editingSlotIdx];
-  const label = slot ? `${slot.s} – ${slot.e}` : 'this slot';
-  if (!confirm(`Delete slot ${label}?\n\nThis removes the booking. This cannot be undone.`)) return;
-  const roomId = modalRoomId;
-  const idx    = editingSlotIdx;
-  closeSlotModal();
-  await deleteSlot(roomId, idx);
-  showToast('✓ Slot deleted');
-}
+  if (!modalRoomId || !editingSlotId || typeof editingSlotTs !== 'number') return;
+  const r = state.rooms.find(room => room.id === modalRoomId);
+  if (!r) return;
+  const slot = (r.slots[modalDay] || []).find(item => item && item.id === editingSlotId);
+  if (!slot) { showToast('Slot not found locally — please Sync'); return; }
+  const label = `${slot.s} – ${slot.e}`;
+  if (!confirm(`Delete slot ${label}?
 
+This removes the booking. This cannot be undone.`)) return;
+  const roomId = modalRoomId, slotId = editingSlotId, slotTs = editingSlotTs, day = modalDay;
+  closeSlotModal();
+  await deleteSlotById(roomId, slotId, slotTs, day);
+}
 function generate4DigitCode() {
   return String(Math.floor(1000 + Math.random() * 9000));
 }
@@ -2159,169 +2145,152 @@ function payChoiceBackdropClick(e) {
 //      – Cancel:        no change at all (stays unpaid).
 async function toggleSlotPaid(roomId, slotIdx) {
   if (!requireLicense('update payment status')) return;
-  const r = state.rooms.find(x => x.id === roomId);
+  const r = state.rooms.find(room => room.id === roomId);
   if (!r) return;
-  const slot = (r.slots[state.schedDay] || [])[slotIdx];
-  if (!slot) { showToast('Slot not found'); return; }
+  const day = state.schedDay;
+  const localSlot = (r.slots[day] || [])[slotIdx];
+  if (!localSlot) { showToast('Slot not found'); return; }
+  const slotId = localSlot.id;
+  const expectedSlotTs = localSlot.slotTs;
+  const bucket = day === 0 ? 'slots' : 'slotsT';
 
-  if (slot.paid) {
-    // paid → unpaid: silent flip.
-    slot.paid = false;
-    markRoomDirty(roomId - 1);
-    persist();
-    await pushRoom(roomId - 1);
-    renderDashboard();
-    refreshTimelineIfVisible();
+  if (localSlot.paid) {
+    const result = await updateSlotById(roomId, slotId, expectedSlotTs, { paid: false }, bucket);
+    if (!result.ok) { showSlotUpdateError(result, 'updating payment status'); return; }
+    const localIdx = (r.slots[day] || []).findIndex(slot => slot && slot.id === slotId);
+    if (localIdx >= 0) r.slots[day][localIdx] = { ...result.slot };
+    persist(); renderDashboard(); refreshTimelineIfVisible();
     showToast('Marked as unpaid');
     return;
   }
 
-  // unpaid → paid: 3-choice dialog. Nothing is saved until a choice is made,
-  // so Cancel truly leaves the slot unpaid.
   const choice = await askPayChoice();
-  if (choice === 'cancel') return; // no change
+  if (choice === 'cancel') return;
+  const latestLocal = (r.slots[day] || []).find(slot => slot && slot.id === slotId);
+  if (!latestLocal) { showToast('Slot no longer exists locally — please Sync'); return; }
+  if (latestLocal.slotTs !== expectedSlotTs) { showToast('⚠️ Slot changed while the dialog was open — try again'); return; }
+
   if (choice === 'update') {
-    await commitSlotPaid(roomId, slotIdx, { sendConfirmation: false });
-    return;
-  }
-  // choice === 'send'
-  if (slot.phone) {
-    await commitSlotPaid(roomId, slotIdx, { sendConfirmation: true });
+    await commitSlotPaidById(roomId, slotId, expectedSlotTs, day, { sendConfirmation: false });
+  } else if (latestLocal.phone) {
+    await commitSlotPaidById(roomId, slotId, expectedSlotTs, day, { sendConfirmation: true });
   } else {
-    // Need contact details first — open the collect window (it sends on submit).
-    openPayModal(roomId, slotIdx);
+    openPayModalById(roomId, slotId, expectedSlotTs, day);
   }
 }
-
 // Marks the slot paid, optionally writing booker name/phone first, persists +
 // pushes, and (optionally) fires the WhatsApp confirmation. Centralises the
 // write so both the direct path and the modal path behave identically.
-async function commitSlotPaid(roomId, slotIdx, opts) {
+async function commitSlotPaidById(roomId, slotId, expectedSlotTs, day, opts) {
   opts = opts || {};
-  const r = state.rooms.find(x => x.id === roomId);
-  if (!r) return;
-  const slot = (r.slots[state.schedDay] || [])[slotIdx];
-  if (!slot) { showToast('Slot not found'); return; }
-  if (typeof opts.bookedBy === 'string') slot.bookedBy = opts.bookedBy || null;
-  if (typeof opts.phone === 'string')    slot.phone = opts.phone || null;
-  slot.paid = true;
-  markRoomDirty(roomId - 1);
-  persist();
-  await pushRoom(roomId - 1);
-  renderDashboard();
-  refreshTimelineIfVisible();
+  const r = state.rooms.find(room => room.id === roomId);
+  if (!r) return false;
+  const changes = { paid: true };
+  if (typeof opts.bookedBy === 'string') changes.bookedBy = opts.bookedBy || null;
+  if (typeof opts.phone === 'string') changes.phone = opts.phone || null;
+  const bucket = day === 0 ? 'slots' : 'slotsT';
+  const result = await updateSlotById(roomId, slotId, expectedSlotTs, changes, bucket);
+  if (!result.ok) { showSlotUpdateError(result, 'updating payment status'); return false; }
+  const localIdx = (r.slots[day] || []).findIndex(slot => slot && slot.id === slotId);
+  if (localIdx >= 0) r.slots[day][localIdx] = { ...result.slot };
+  persist(); renderDashboard(); refreshTimelineIfVisible();
   showToast('✓ Marked as paid');
-  if (opts.sendConfirmation) sendSlotWhatsApp(r, slot);
+  if (opts.sendConfirmation) sendSlotWhatsApp(r, result.slot);
+  return true;
 }
-
 // Shared "offer to send a WhatsApp confirmation for a paid slot" step, used by
 // the edit-slot save. Asks first; on Yes, sends if a phone is on file, else
 // opens the collect window to gather Name + Phone then send. On No, does
 // nothing (the slot is already saved as paid by the caller). `day` is the slot's
 // bucket; we align state.schedDay to it so the collect modal / sender target
 // the right slot.
-function maybeSendPaidConfirmation(roomId, slotIdx, day) {
-  const r = state.rooms.find(x => x.id === roomId);
+function maybeSendPaidConfirmationById(roomId, slotId, day) {
+  const r = state.rooms.find(room => room.id === roomId);
   if (!r) return;
-  if (state.schedDay !== day) setSchedDay(day);
-  const slot = (r.slots[day] || [])[slotIdx];
+  const slot = (r.slots[day] || []).find(item => item && item.id === slotId);
   if (!slot) return;
   if (!confirm('This booking is marked Paid.\n\nSend a WhatsApp confirmation to the customer?')) return;
-  if (slot.phone) {
-    sendSlotWhatsApp(r, slot);
-  } else {
-    // No phone yet — collect it, then the modal sends on submit.
-    openPayModal(roomId, slotIdx);
-  }
+  if (slot.phone) sendSlotWhatsApp(r, slot);
+  else openPayModalById(roomId, slot.id, slot.slotTs, day);
 }
-
+function maybeSendPaidConfirmation(roomId, slotIdx, day) {
+  const r = state.rooms.find(room => room.id === roomId);
+  const slot = r && (r.slots[day] || [])[slotIdx];
+  if (slot) maybeSendPaidConfirmationById(roomId, slot.id, day);
+}
 // ── Payment-details collect modal ─────────────────────────────
 let payModalRoomId = null;
-let payModalSlotIdx = null;
+let payModalSlotId = null;
+let payModalExpectedSlotTs = null;
 let payModalDay = 0;
-
-// Opens the small "collect Name + Phone" window shown when marking an
-// unpaid slot as paid that has no phone yet. Prefills any existing name.
-function openPayModal(roomId, slotIdx) {
-  const r = state.rooms.find(x => x.id === roomId);
-  const slot = r && (r.slots[state.schedDay] || [])[slotIdx];
+function openPayModalById(roomId, slotId, expectedSlotTs, day) {
+  const r = state.rooms.find(room => room.id === roomId);
+  const slot = r && (r.slots[day] || []).find(item => item && item.id === slotId);
   if (!slot) { showToast('Slot not found'); return; }
   payModalRoomId = roomId;
-  payModalSlotIdx = slotIdx;
-  payModalDay = state.schedDay; // capture the bucket now — schedDay could change later
+  payModalSlotId = slotId;
+  payModalExpectedSlotTs = expectedSlotTs;
+  payModalDay = day;
   document.getElementById('payModalTitle').textContent = `Payment — ${r.name} ${slot.s}–${slot.e}`;
   document.getElementById('pay_name').value = slot.bookedBy || '';
   document.getElementById('pay_phone').value = slot.phone || '';
   document.getElementById('payModal').classList.add('show');
   setTimeout(() => { const el = document.getElementById('pay_phone'); if (el) el.focus(); }, 50);
 }
-
+function openPayModal(roomId, slotIdx) {
+  const r = state.rooms.find(room => room.id === roomId);
+  const day = state.schedDay;
+  const slot = r && (r.slots[day] || [])[slotIdx];
+  if (!slot) { showToast('Slot not found'); return; }
+  openPayModalById(roomId, slot.id, slot.slotTs, day);
+}
 function closePayModal() {
   document.getElementById('payModal').classList.remove('show');
   payModalRoomId = null;
-  payModalSlotIdx = null;
+  payModalSlotId = null;
+  payModalExpectedSlotTs = null;
+  payModalDay = 0;
 }
-
 function payModalBackdropClick(e) {
   if (e.target.id === 'payModal') closePayModal();
 }
-
-// Submit the collect window: phone is required (needed to send the WhatsApp
-// confirmation); name is optional. On success, save details + mark paid + send.
 async function savePayModal() {
-  if (payModalRoomId === null || payModalSlotIdx === null) return;
-  const name  = document.getElementById('pay_name').value.trim();
+  if (payModalRoomId === null || !payModalSlotId || typeof payModalExpectedSlotTs !== 'number') return;
+  const name = document.getElementById('pay_name').value.trim();
   const phone = document.getElementById('pay_phone').value.trim();
   if (!phone) { showToast('⚠️ Phone number is required to confirm'); return; }
-  // Validate the phone the same way the WhatsApp sender will.
   const p = getActiveProfile();
   if (!buildWhatsAppNumber(phone, p.whatsappCountryCode)) { showToast('⚠️ Enter a valid phone number'); return; }
-  const roomId = payModalRoomId, slotIdx = payModalSlotIdx;
-  // The modal captured the day bucket at open; align schedDay so commitSlotPaid
-  // (which indexes by state.schedDay) targets the same slot.
-  if (state.schedDay !== payModalDay) setSchedDay(payModalDay);
+  const roomId = payModalRoomId, slotId = payModalSlotId;
+  const expectedSlotTs = payModalExpectedSlotTs, day = payModalDay;
   closePayModal();
-  await commitSlotPaid(roomId, slotIdx, { bookedBy: name, phone, sendConfirmation: true });
+  await commitSlotPaidById(roomId, slotId, expectedSlotTs, day, { bookedBy: name, phone, sendConfirmation: true });
 }
-
 async function editSlotCode(roomId, slotIdx) {
   if (!requireLicense('change a slot code')) return;
-  const r = state.rooms.find(x => x.id === roomId);
-  const slot = r.slots[state.schedDay][slotIdx];
-  const current = slot.code || '';
-  const newCode = prompt(`Change activation code for ${r.name} ${slot.s}-${slot.e}\n\nEnter new 4-digit code (or leave blank to auto-generate):`, current);
-  if (newCode === null) return; // cancelled
-  const trimmed = newCode.trim();
-  if (trimmed === '') {
-    slot.code = generate4DigitCode();
-    showToast('New code: ' + slot.code + ' (auto-generated)');
-  } else if (/^[0-9]{4}$/.test(trimmed)) {
-    slot.code = trimmed;
-    showToast('Code updated to: ' + slot.code);
-  } else {
-    showToast('Invalid code — must be exactly 4 digits'); return;
-  }
-  // Reset activation if code changed
-  slot.activatedAt = null;
-  slot.activatedBy = null;
-  slot.attempts    = 0;
-  slot.lockedUntil = null;
-  markRoomDirty(roomId - 1);
-  persist();
-  const p = getActiveProfile(); // pinned once — same db for both calls below
-  await pushRoom(roomId - 1, p);
-  // pushRoom()'s per-slot write deliberately excludes activation fields (see
-  // its own comment) so routine saves can't clobber a real activation from
-  // activate.html — but that means this reset needs its own direct write,
-  // same technique as deactivateSlot(), or the old activatedAt stays live in
-  // Firebase and gets synced right back, silently undoing the reset above.
-  // Goes through writeRoomSlots() (full object, not a field-only patch) so
-  // this write also bumps slotsUpdatedAt.
-  await writeRoomSlots(roomId, { [slotIdx]: { ...slot } }, p);
-  renderDashboard();
-  refreshTimelineIfVisible();
-}
+  const r = state.rooms.find(room => room.id === roomId);
+  if (!r) return;
+  const day = state.schedDay;
+  const localSlot = (r.slots[day] || [])[slotIdx];
+  if (!localSlot) { showToast('Slot not found'); return; }
+  const entered = prompt(`Change activation code for ${r.name} ${localSlot.s}-${localSlot.e}
 
+Enter a new 4-digit code, or leave blank to auto-generate:`, localSlot.code || '');
+  if (entered === null) return;
+  const trimmed = entered.trim();
+  let newCode;
+  if (trimmed === '') newCode = generate4DigitCode();
+  else if (/^[0-9]{4}$/.test(trimmed)) newCode = trimmed;
+  else { showToast('Invalid code — must be exactly 4 digits'); return; }
+  const result = await updateSlotById(roomId, localSlot.id, localSlot.slotTs, {
+    code: newCode, activatedAt: null, activatedBy: null, attempts: 0, lockedUntil: null, expired: false
+  }, day === 0 ? 'slots' : 'slotsT');
+  if (!result.ok) { showSlotUpdateError(result, 'updating the code'); return; }
+  const localIdx = (r.slots[day] || []).findIndex(slot => slot && slot.id === localSlot.id);
+  if (localIdx >= 0) r.slots[day][localIdx] = { ...result.slot };
+  persist(); renderDashboard(); refreshTimelineIfVisible();
+  showToast('Code updated to: ' + newCode);
+}
 function toggleCodeInput(id, requireCode) {
   const row = document.getElementById('codeRow_' + id);
   if (row) {
@@ -2365,35 +2334,34 @@ function toMinsStr(t) {
 // ── Slot activation ───────────────────────────────────────────
 async function activateSlot(roomId, slotIdx) {
   if (!requireLicense('activate a slot')) return;
-  const r = state.rooms.find(x => x.id === roomId);
-  const slot = r.slots[0][slotIdx];
-  const now = Date.now();
-  slot.activatedAt = now;
-  slot.activatedBy = 'admin';
+  const r = state.rooms.find(room => room.id === roomId);
+  if (!r) return;
+  const localSlot = (r.slots[0] || [])[slotIdx];
+  if (!localSlot) { showToast('Slot not found'); return; }
+  const result = await updateSlotById(roomId, localSlot.id, localSlot.slotTs, {
+    activatedAt: Date.now(), activatedBy: 'admin', attempts: 0, lockedUntil: null, expired: false
+  }, 'slots');
+  if (!result.ok) { showSlotUpdateError(result, 'activating'); return; }
+  const localIdx = (r.slots[0] || []).findIndex(slot => slot && slot.id === localSlot.id);
+  if (localIdx >= 0) r.slots[0][localIdx] = { ...result.slot };
   r.override = null;
-  persist();
-  renderDashboard();
-  // Full slot object via writeRoomSlots() — avoids array overwrite issue,
-  // and bumps slotsUpdatedAt so the ESP32 notices without waiting on an
-  // unrelated write to this room.
-  await writeRoomSlots(roomId, { [slotIdx]: { ...slot } });
+  persist(); renderDashboard();
   showToast('✓ Slot activated');
 }
-
 async function deactivateSlot(roomId, slotIdx) {
   if (!requireLicense('deactivate a slot')) return;
-  const r = state.rooms.find(x => x.id === roomId);
-  const slot = r.slots[0][slotIdx];
-  slot.activatedAt = null;
-  slot.activatedBy = null;
-  slot.attempts    = 0;
-  slot.lockedUntil = null;
-  slot.expired     = false;
-  persist();
-  renderDashboard();
-  // Full slot object via writeRoomSlots() — bumps slotsUpdatedAt too.
-  await writeRoomSlots(roomId, { [slotIdx]: { ...slot } });
-  showToast('Slot deactivated');
+  const r = state.rooms.find(room => room.id === roomId);
+  if (!r) return;
+  const localSlot = (r.slots[0] || [])[slotIdx];
+  if (!localSlot) { showToast('Slot not found'); return; }
+  const result = await updateSlotById(roomId, localSlot.id, localSlot.slotTs, {
+    activatedAt: null, activatedBy: null, attempts: 0, lockedUntil: null, expired: false
+  }, 'slots');
+  if (!result.ok) { showSlotUpdateError(result, 'deactivating'); return; }
+  const localIdx = (r.slots[0] || []).findIndex(slot => slot && slot.id === localSlot.id);
+  if (localIdx >= 0) r.slots[0][localIdx] = { ...result.slot };
+  persist(); renderDashboard();
+  showToast('✓ Slot deactivated');
 }
 
 // ── QR code ───────────────────────────────────────────────────
@@ -3182,6 +3150,30 @@ const overrideWriteTime = {};
 // only ever refreshed once, explicitly, via checkDailySlotRefresh() — see
 // that function for why. Room light status and manual override still sync
 // live, since those aren't what caused the trouble.
+const slotStatusRefreshTimers = {};
+function scheduleSlotStatusRefresh(roomId) {
+  clearTimeout(slotStatusRefreshTimers[roomId]);
+  slotStatusRefreshTimers[roomId] = setTimeout(() => refreshRoomSlotStatusesById(roomId), 150);
+}
+async function refreshRoomSlotStatusesById(roomId) {
+  const p = getActiveProfile();
+  const r = state.rooms.find(room => room.id === roomId);
+  if (!r) return;
+  const raw = await fbGet(`/rooms/room${roomId}/slots`, p);
+  if (!raw) return;
+  let changed = false;
+  normalizeSlots(raw).forEach(remoteSlot => {
+    if (!remoteSlot || !remoteSlot.id) return;
+    const localSlot = (r.slots[0] || []).find(slot => slot && slot.id === remoteSlot.id);
+    if (!localSlot) return;
+    ['activatedAt','activatedBy','attempts','lockedUntil','expired','slotTs'].forEach(fieldName => {
+      if (remoteSlot[fieldName] !== undefined && localSlot[fieldName] !== remoteSlot[fieldName]) {
+        localSlot[fieldName] = remoteSlot[fieldName]; changed = true;
+      }
+    });
+  });
+  if (changed) { persist(); renderDashboard(); refreshTimelineIfVisible(); }
+}
 function applyFirebasePathUpdate(path, value) {
   const segments = (path || '/').split('/').filter(Boolean);
 
@@ -3211,14 +3203,10 @@ function applyFirebasePathUpdate(path, value) {
   // activate.html and never touched by pushRoom(), so there's nothing to
   // race against. Without this, activating a slot via the QR page never
   // shows up on the dashboard until the next once-daily slot refresh.
-  if (field === 'slots' && segments.length >= 4) {
-    const slotIdx  = parseInt(segments[2], 10);
+  if (field === 'slots' && segments.length >= 3) {
     const subField = segments[3];
-    if (['activatedAt', 'activatedBy', 'attempts', 'lockedUntil'].includes(subField) &&
-        room.slots[0] && room.slots[0][slotIdx]) {
-      room.slots[0][slotIdx][subField] = value;
-      renderDashboard();
-      persist();
+    if (!subField || ['activatedAt','activatedBy','attempts','lockedUntil','expired','slotTs'].includes(subField)) {
+      scheduleSlotStatusRefresh(room.id);
     }
     return;
   }
@@ -3275,11 +3263,12 @@ function syncFromFirebase(data) {
     if (r.lightOn !== undefined) room.lightOn = r.lightOn;
 
     if (r.slots && room.slots[0]) {
-      normalizeSlots(r.slots).forEach((remoteSlot, i) => {
-        const localSlot = room.slots[0][i];
+      normalizeSlots(r.slots).forEach(remoteSlot => {
+        if (!remoteSlot || !remoteSlot.id) return;
+        const localSlot = room.slots[0].find(slot => slot && slot.id === remoteSlot.id);
         if (!localSlot) return;
-        ['activatedAt', 'activatedBy', 'attempts', 'lockedUntil'].forEach(f => {
-          if (remoteSlot[f] !== undefined) localSlot[f] = remoteSlot[f];
+        ['activatedAt','activatedBy','attempts','lockedUntil','expired','slotTs'].forEach(fieldName => {
+          if (remoteSlot[fieldName] !== undefined) localSlot[fieldName] = remoteSlot[fieldName];
         });
       });
     }
@@ -3601,6 +3590,128 @@ async function bumpRoomsUpdatedAt(p) {
   return fbPatch('/config', { roomsUpdatedAt: Date.now() }, p);
 }
 
+// ── Sync V2 coverage helpers ─────────────────────────────────
+function syncV2GenerationToday() {
+  const d = new Date();
+  return Number(String(d.getFullYear()) + String(d.getMonth()+1).padStart(2,'0') + String(d.getDate()).padStart(2,'0'));
+}
+function syncV2Bucket(bucket) { return bucket === 'slotsT' || bucket === 1 ? 'tomorrow' : 'today'; }
+async function syncV2Meta(profile, reason) {
+  const p = profile || getActiveProfile();
+  const generation = syncV2GenerationToday();
+  let meta = await fbGet('/sync/meta', p);
+  if (!meta || Number(meta.generation) !== generation) {
+    meta = { schemaVersion:2, generation, revision:1, resetAt:Date.now(), resetReason:reason || 'pwa' };
+    const ok = await fbPatch('/', {
+      'sync/meta': meta,
+      'sync/changes': { '1': { type:'FULL_SYNC', reason:reason || 'pwa', generation, updatedAt:Date.now() } }
+    }, p);
+    if (!ok) return null;
+  }
+  return meta;
+}
+async function publishSlotSyncV2(roomId, bucket, slot, operation, profile) {
+  const p = profile || getActiveProfile();
+  const meta = await syncV2Meta(p, 'slot_mutation');
+  if (!meta || !slot || !slot.id) return false;
+  const revision = Number(meta.revision || 1) + 1;
+  const now = Date.now();
+  const canonicalBucket = syncV2Bucket(bucket);
+  const canonical = { ...slot, id:slot.id, version:Number(slot.version || 0) + 1,
+    slotTs:now, updatedAt:now, deleted:!!slot.deleted };
+  delete canonical._fresh;
+  const patch = {};
+  patch[`slotRecords/room${roomId}/${canonicalBucket}/${slot.id}`] = canonical;
+  patch[`sync/changes/${revision}`] = {
+    entity:'slot', operation:operation || (canonical.deleted ? 'delete':'update'),
+    roomId, bucket:canonicalBucket, recordId:slot.id, version:canonical.version,
+    revision, generation:meta.generation, updatedAt:now
+  };
+  patch['sync/meta/revision'] = revision;
+  patch['sync/meta/updatedAt'] = now;
+  return await fbPatch('/', patch, p) ? canonical : false;
+}
+async function publishRecurringDefSyncV2(roomId, def, operation, profile) {
+  const p = profile || getActiveProfile();
+  if (!def || !def.id) return false;
+  const meta = await syncV2Meta(p, 'recurring_definition');
+  if (!meta) return false;
+  const revision = Number(meta.revision || 1) + 1;
+  const now = Date.now();
+  const version = Number(def.version || 0) + 1;
+  const patch = {};
+  if (operation === 'delete') {
+    // Keep a tombstone so an offline PWA can learn the definition was deleted.
+    patch[`recurringDefs/room${roomId}/${def.id}`] = {
+      id:def.id, deleted:true, version, defTs:now, updatedAt:now
+    };
+  } else {
+    patch[`recurringDefs/room${roomId}/${def.id}`] = {
+      ...def, id:def.id, deleted:false, version, defTs:now, updatedAt:now
+    };
+  }
+  patch[`sync/changes/${revision}`] = {
+    entity:'recurringDef', operation, roomId, recordId:def.id,
+    version, revision, generation:meta.generation, updatedAt:now
+  };
+  patch['sync/meta/revision'] = revision;
+  patch['sync/meta/updatedAt'] = now;
+  const ok = await fbPatch('/', patch, p);
+  return ok ? { ...def, version, defTs:now, updatedAt:now, deleted:operation === 'delete' } : false;
+}
+
+async function publishRoomSnapshotSyncV2(room, profile, reason) {
+  if (!room || !room.id) return false;
+  const p = profile || getActiveProfile();
+  const meta = await syncV2Meta(p, reason || 'room_snapshot');
+  if (!meta) return false;
+  const revision = Number(meta.revision || 1) + 1;
+  const now = Date.now();
+  const patch = {};
+  patch[`roomIndex/room${room.id}`] = {
+    id:room.id, name:room.name || `Room ${room.id}`,
+    relayPin:room.relayPin ?? null, ledPin:room.ledPin ?? null, updatedAt:now
+  };
+  const addSlots = (list,bucket) => (list || []).forEach(slot => {
+    if (!slot || !slot.id) return;
+    patch[`slotRecords/room${room.id}/${bucket}/${slot.id}`] = {
+      ...slot, version:Number(slot.version || 1), updatedAt:Number(slot.updatedAt || slot.slotTs || now), deleted:!!slot.deleted
+    };
+  });
+  addSlots(room.slots && room.slots[0], 'today');
+  addSlots(room.slots && room.slots[1], 'tomorrow');
+  (room.recurringDefs || []).forEach(def => {
+    if (!def || !def.id) return;
+    patch[`recurringDefs/room${room.id}/${def.id}`] = {
+      ...def, version:Number(def.version || 1), updatedAt:Number(def.updatedAt || def.defTs || now), deleted:!!def.deleted
+    };
+  });
+  patch[`sync/changes/${revision}`] = {
+    entity:'roomSnapshot', operation:'refresh', roomId:room.id,
+    recordId:`room${room.id}`, reason:reason || 'room_snapshot',
+    revision, generation:meta.generation, updatedAt:now
+  };
+  patch['sync/meta/revision'] = revision;
+  patch['sync/meta/updatedAt'] = now;
+  return fbPatch('/', patch, p);
+}
+async function resetDailySyncV2(profile, reason) {
+  const p = profile || getActiveProfile();
+  const generation = syncV2GenerationToday();
+  const now = Date.now();
+  return fbPatch('/', {
+    'sync/meta': { schemaVersion:2, generation, revision:1, resetAt:now, resetReason:reason || 'midnight_rollover' },
+    'sync/changes': { '1': { type:'FULL_SYNC', reason:reason || 'midnight_rollover', generation, updatedAt:now } }
+  }, p);
+}
+async function bumpConfigSyncV2(profile, changedKeys) {
+  const p = profile || getActiveProfile();
+  const current = await fbGet('/configSync/version', p);
+  return fbPatch('/configSync', {
+    version:Number(current || 0) + 1, updatedAt:Date.now(), changedKeys:changedKeys || []
+  }, p);
+}
+
 async function writeRoomSlots(roomId, slotsByIndex, p, extraFields) {
   if (Object.keys(slotsByIndex).length === 0 && !extraFields) return true;
   await bumpRoomsUpdatedAt(p);
@@ -3611,6 +3722,63 @@ async function writeRoomSlots(roomId, slotsByIndex, p, extraFields) {
   return fbPatch(`/rooms/room${roomId}`, flat, p);
 }
 
+// Resolves an EXISTING slot's current remote index fresh by id, then writes
+// through writeRoomSlots() — for activateSlot/deactivateSlot/editSlotCode
+// and similar single-slot updates, which must never trust an index captured
+// earlier (render time, a stale local array): another device's edit to
+// that same room in the meantime can shift it. See findSlotById() in
+// activate.html for the reference version of this pattern; unlike
+// pushRoom()'s full id-based merge (which already recomputes positions
+// fresh every time and doesn't need this), these call writeRoomSlots()
+// directly with a single caller-supplied index today. Returns false — the
+// caller must surface this, never guess — if the slot can no longer be
+// found at all.
+function showSlotUpdateError(result, actionText) {
+  if (result && result.reason === 'conflict') showToast(`⚠️ This slot changed on another device — Sync before ${actionText}`);
+  else if (result && result.reason === 'not_found') showToast('⚠️ This slot no longer exists in Firebase — Sync required');
+  else if (result && result.reason === 'missing_timestamp') showToast('⚠️ Slot version is missing — Sync before updating');
+  else showToast(`⚠️ Could not ${actionText} — check the connection`);
+}
+async function updateSlotById(roomId, slotId, expectedSlotTs, changes, bucket, profile) {
+  const p = profile || getActiveProfile();
+  const slotBucket = bucket || 'slots';
+  const roomPath = `/rooms/room${roomId}`;
+  const raw = await fbGet(`${roomPath}/${slotBucket}`, p);
+  if (raw === null || raw === undefined) return { ok:false, reason:'not_found' };
+
+  // Keep the actual Firebase child key. normalizeSlots() filters holes and can shift indexes.
+  const entries = Array.isArray(raw)
+    ? raw.map((slot, index) => [String(index), slot])
+    : Object.entries(raw);
+  const match = entries.find(([key, slot]) => slot && slot.id === slotId);
+  if (!match) return { ok:false, reason:'not_found' };
+  const firebaseKey = match[0], remoteSlot = match[1];
+
+  if (typeof expectedSlotTs !== 'number' || typeof remoteSlot.slotTs !== 'number') {
+    return { ok:false, reason:'missing_timestamp', remote:remoteSlot,
+      expectedSlotTs, actualSlotTs:remoteSlot.slotTs };
+  }
+  if (remoteSlot.slotTs !== expectedSlotTs) {
+    return { ok:false, reason:'conflict', remote:remoteSlot,
+      expectedSlotTs, actualSlotTs:remoteSlot.slotTs };
+  }
+
+  const updatedSlot = { ...remoteSlot, ...changes, id:remoteSlot.id, slotTs:Date.now() };
+  let writeOk;
+  if (slotBucket === 'slots') {
+    writeOk = await writeRoomSlots(roomId, { [firebaseKey]: updatedSlot }, p);
+  } else {
+    await bumpRoomsUpdatedAt(p);
+    writeOk = await fbPatch(roomPath, { [`${slotBucket}/${firebaseKey}`]: updatedSlot }, p);
+  }
+  if (!writeOk) return { ok:false, reason:'write_failed' };
+  const canonical = await publishSlotSyncV2(
+    roomId, slotBucket, updatedSlot,
+    updatedSlot.deleted ? 'delete' : 'update', p
+  );
+  if (!canonical) return { ok:false, reason:'sync_write_failed' };
+  return { ok:true, firebaseKey, slot:canonical, slotTs:canonical.slotTs };
+}
 async function pushRoom(idx, profile) {
   const p = profile || getActiveProfile();
   const r = state.rooms[idx];
@@ -4020,6 +4188,10 @@ async function pushRoom(idx, profile) {
     showToast('⚠️ ' + (r.name || ('Room ' + r.id)) + ': someone else changed this — Sync and try again');
   }
 
+  if (ok) {
+    const syncOk = await publishRoomSnapshotSyncV2(r, p, 'pushRoom');
+    if (!syncOk) ok = false;
+  }
   addLog(ok ? 'ok' : 'error', `room${r.id} → Firebase`);
   setConnStatus(ok);
   return ok && !conflict;
@@ -4217,6 +4389,7 @@ async function forceAllRoomsRollover() {
   // rollover today instead of redundantly re-running it (and resetting
   // activation state on a slot someone activates between now and then).
   await fbSet('/config/lastRolloverEpochDay', today, p);
+  await resetDailySyncV2(p, 'midnight_rollover');
   renderDashboard();
   showToast('✓ Slot rollover forced for all rooms');
   addLog('ok', 'Manual slot rollover — all rooms');
@@ -4327,28 +4500,27 @@ async function addSlot(id) {
   openSlotModal(id);
 }
 
-async function deleteSlot(id, idx) {
-  if (!requireLicense('delete a slot')) return;
-  const r = state.rooms.find(x => x.id === id);
-  const deletedSlot = normalizeSlots(r.slots[state.schedDay])[idx];
-  if (!deletedSlot) return;
-  // Soft delete — same object, same id, just flagged — rather than splicing
-  // it out. This makes delete just another edit that goes through
-  // pushRoom()'s normal id+slotTs merge instead of being represented by
-  // absence, which is what let a delete get silently undone by a sync from
-  // a stale device. slotTs is deliberately left untouched here, same as any
-  // other field edit (see saveSlotFromModal) — it still holds "the value
-  // this device last confirmed was in Firebase", which is what lets
-  // pushRoom() tell a normal write apart from a real conflict; pushRoom
-  // stamps the fresh slotTs itself once the write actually happens.
-  // visibleSlots() hides it everywhere it shouldn't show; midnight rollover
-  // is what actually erases it later.
-  deletedSlot.deleted = true;
-  markRoomDirty(id-1);
-  persist(); await pushRoom(id-1); renderDashboard(); refreshTimelineIfVisible();
-  if (deletedSlot.id) await revertRequestForDeletedSlot(id, deletedSlot.id, getActiveProfile());
+async function deleteSlotById(roomId, slotId, expectedSlotTs, day) {
+  if (!requireLicense('delete a slot')) return false;
+  const r = state.rooms.find(room => room.id === roomId);
+  if (!r) { showToast('Room not found'); return false; }
+  const result = await updateSlotById(roomId, slotId, expectedSlotTs, { deleted:true }, day === 0 ? 'slots' : 'slotsT', getActiveProfile());
+  if (!result.ok) { showSlotUpdateError(result, 'deleting'); return false; }
+  const localIdx = (r.slots[day] || []).findIndex(slot => slot && slot.id === slotId);
+  if (localIdx >= 0) r.slots[day][localIdx] = { ...result.slot };
+  persist(); renderDashboard(); refreshTimelineIfVisible();
+  await revertRequestForDeletedSlot(roomId, slotId, getActiveProfile());
+  showToast('✓ Slot deleted');
+  return true;
 }
-
+async function deleteSlot(roomId, slotIdx) {
+  const r = state.rooms.find(room => room.id === roomId);
+  if (!r) return false;
+  const day = state.schedDay;
+  const slot = (r.slots[day] || [])[slotIdx];
+  if (!slot) { showToast('Slot not found'); return false; }
+  return deleteSlotById(roomId, slot.id, slot.slotTs, day);
+}
 // Deleting a slot that came from a confirmed booking request leaves that
 // request pointing at a slot that no longer exists. Put it back to "open"
 // so it's visible/actionable in the Requests tab again — this is a plain
@@ -5431,6 +5603,11 @@ function finishSaveSettings(p, message) {
     fbSet('/config/whatsappTemplate', p.whatsappTemplate || DEFAULT_WHATSAPP_TEMPLATE, p);
     fbSet('/config/whatsappCountryCode', p.whatsappCountryCode || '91', p);
     fbSet('/config/relayWiring', p.relayWiring || 'NC', p);
+    bumpConfigSyncV2(p, [
+      'adminSeed','emergencyPin','emergencyTimeout','activateWindowHours','autoApproveBookings',
+      'beeperPin','warnMinutes','beepMs','beepCount','whatsappTemplate',
+      'whatsappCountryCode','relayWiring','rooms'
+    ]).catch(() => {});
     pushAllRooms(p);
     startFbListener();
   }
