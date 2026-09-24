@@ -18,7 +18,8 @@ Every mutation that changes an effective slot or schedule writes the legacy proj
 - [x] Recurring UPDATE: updates the definition and writes explicit `recurringDef/update` delta.
 - [x] Recurring DELETE: writes a definition tombstone and explicit `recurringDef/delete` delta.
 - [x] Recurring materialization: `pushRoom` also publishes current today/tomorrow slot snapshots.
-- [x] Forced/midnight rollover: establishes authoritative buckets and resets daily Sync V2 to generation + revision 1 with `FULL_SYNC`.
+- [x] Forced/midnight rollover: verifies every room write and the rollover marker, then resets daily Sync V2 to generation + revision 1 with `FULL_SYNC`.
+- [x] Manual controller full sync: Settings > Slot maintenance publishes `FULL_SYNC` without changing or rolling over slots.
 - [x] Settings save: increments `/configSync/version`; it does not reset daily slot sync.
 
 ## Customer activation (`activate.html`)
