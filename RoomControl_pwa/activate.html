@@ -161,6 +161,11 @@ let selectedRoom = null;
 let selectedSlot = null;
 let pinValue     = '';
 let loadingSlots = false;  // prevent duplicate concurrent loads
+// Last-seen /config/roomsUpdatedAt — loadSlots() skips its whole Firebase
+// read when this hasn't moved since the previous load. Sentinel value a real
+// marker (a number, or null from an unset config) can never equal, so the
+// first call always falls through to a genuine fetch.
+let lastRoomsMarker = '__unset__';
 
 // ── Helpers ───────────────────────────────────────────────────
 function toMins(t) { const [h,m]=t.split(':').map(Number); return h*60+m; }
@@ -322,6 +327,17 @@ async function loadSlots() {
   if (loadingSlots) return;
   if (userIsBusy()) return;  // don't refresh while PIN pad is open
   loadingSlots = true;
+
+  // Cheap check first: skip the entire read below when nothing has changed
+  // anywhere since the last load. This runs BEFORE allRooms is cleared, so an
+  // early return leaves the currently-rendered list exactly as it is. null is
+  // never treated as "unchanged" — an unset /config/roomsUpdatedAt (predates
+  // this feature, or genuinely nothing has ever written it) must not block the
+  // very first real read.
+  const marker = await fbGet('/config/roomsUpdatedAt');
+  if (marker !== null && marker === lastRoomsMarker) { loadingSlots = false; return; }
+  lastRoomsMarker = marker;
+
   const prevAllRooms = allRooms; // save before clearing — used to preserve activation state
   allRooms = [];
 
@@ -365,7 +381,7 @@ async function loadSlots() {
       const roomName = room.name || key;
 
       // Fetch slots directly — Firebase stores as nested object {"0":{...}}
-      const rawSlots = await fbGet('/rooms/' + key + '/slots');  // always fresh
+      const rawSlots = room.slots;  // already present in the /rooms read above
 
       // Normalize to array
       let slotsArr = [];
@@ -436,7 +452,7 @@ async function loadSlots() {
       // (the portion of the window that spills past midnight).
       if (windowHours > 0 && windowEndMins > 1440) {
         const wrappedEndMins = windowEndMins - 1440;
-        const rawSlotsT = await fbGet('/rooms/' + key + '/slotsT');
+        const rawSlotsT = room.slotsT;  // already present in the /rooms read above
         let slotsTArr = [];
         if (Array.isArray(rawSlotsT)) slotsTArr = rawSlotsT;
         else if (rawSlotsT) slotsTArr = Object.keys(rawSlotsT).sort((a,b)=>parseInt(a)-parseInt(b)).map(k => rawSlotsT[k]);
@@ -460,39 +476,15 @@ async function loadSlots() {
 
     document.getElementById('loadingState').style.display = 'none';
     renderSlots();
-    verifyAndRender(); // verify Waiting slots against Firebase
+    // verifyAndRender() removed: the slot data above was just read fresh from
+    // Firebase in this same call, so re-reading each "Waiting" slot one-by-one
+    // only repeated what we already had.
 
   } catch(e) {
     showError('Error loading slots. Please refresh the page.');
   } finally {
     loadingSlots = false;
   }
-}
-
-// ── Verify slot activation status directly from Firebase ────────
-// Called before showing "Waiting" to confirm slot is truly not activated
-async function verifyAndRender() {
-  const nm = nowMins();
-  let needsRerender = false;
-
-  for (const room of allRooms) {
-    for (const sl of room.slots) {
-      // Only verify slots currently in time window that appear unactivated.
-      // A slotsT (tomorrow) entry hasn't started yet by definition — never "current".
-      const isCurrent = sl.bucket !== 'slotsT' && toMins(sl.s) <= nm && toMins(sl.e) > nm;
-      if (!isCurrent || sl.activatedAt || !sl.code) continue;
-
-      // Fetch latest activatedAt directly from Firebase — by id, not the
-      // index captured at load time (see findSlotById()).
-      const { slot: freshSlot } = await findSlotById(sl.roomKey, sl.bucket || 'slots', sl.id);
-      if (freshSlot && freshSlot.activatedAt) {
-        sl.activatedAt = freshSlot.activatedAt; // update local — slot IS activated
-        needsRerender = true;
-      }
-    }
-  }
-
-  if (needsRerender) renderSlots();
 }
 
 // ── Render slots ──────────────────────────────────────────────
@@ -682,6 +674,13 @@ async function pinSubmit() {
       if (bucket !== 'slotsT') {
         await fbPut(`/rooms/${selectedSlot.roomKey}/slotsUpdatedAt`, Date.now());
       }
+      // Bump the global marker too — this is what another device's activation
+      // page (and request.html) checks before paying for a full read. Without
+      // it, an activation here would never invalidate their cached marker and
+      // they'd keep skipping the refresh. Both buckets bump it, since either
+      // changes what other viewers should see.
+      await fbPatch('/config', { roomsUpdatedAt: Date.now() });
+
       const activatedAt = Date.now();
       const activatedBy = isAdmin ? 'admin' : 'slot';
       const a1 = await fbPut(slotBasePath + '/activatedAt', activatedAt);
@@ -847,8 +846,12 @@ if (FIREBASE_URL && PROFILE_NUM) {
     }
   }, 10000);
 
-  // Full refresh every 10 seconds — always fresh from Firebase, no cache
-  setInterval(() => loadSlots(), 10000);
+  // Periodic marker check. loadSlots() now reads the tiny
+  // /config/roomsUpdatedAt marker first and returns immediately when it hasn't
+  // moved, so this costs one small read per tick instead of a full
+  // /rooms download. Stretched 10s → 30s as well: SSE below already delivers
+  // changes promptly, and this page self-closes after 30s idle / 2min max.
+  setInterval(() => loadSlots(), 30000);
 
   // Firebase SSE — refresh when any data changes. Debounced (via
   // scheduleRefresh below), NOT an immediate loadSlots() per event — a
