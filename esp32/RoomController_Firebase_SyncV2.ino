@@ -6,16 +6,6 @@
  *             LittleFS (bundled with modern ESP32 board packages),
  *             WiFi, HTTPClient, WiFiClientSecure (all built-in)
  *
- *  v6.9 — Emergency-light auto-off survives power blips:
- *  - A /config/emergencyTimeout read that returns "error" (network not up yet
- *    after a reboot) is NO LONGER treated as "disabled" (which left the
- *    emergency light permanently ON). It keeps the last value, falls back to a
- *    LittleFS-persisted value, and retries every 10 s until a real value is read
- *    (emergencyTimeoutMin: -1 unknown / 0 disabled / >0 minutes).
- *  - The standby timer uses WALL-CLOCK time (time(nullptr)) not millis(), so a
- *    reboot mid-standby no longer restarts the countdown — the timeout fires on
- *    real elapsed time even across power fluctuations.
- *
  *  v6.8 — HTTPS connection reuse (persistent TLS client):
  *  - fbGet/fbPut/fbPatch share one long-lived WiFiClientSecure + HTTPClient
  *    with setReuse(true), so the TLS handshake (and its ~3-5 KB cert-chain
@@ -80,7 +70,7 @@
 // Forward declarations used by Sync V2.
 void applyRelayWiringConfig();
 void applyEmergencyPinConfig();
-bool applyEmergencyTimeoutConfig();
+void applyEmergencyTimeoutConfig();
 void applyBeeperPinConfig();
 void applyWarnMinutesConfig();
 void applyBeepConfig();
@@ -157,24 +147,12 @@ int emergencyPin = PIN_NONE;
 // /config/emergencyTimeout, 0 (or unset) = disabled = the original always-on
 // behaviour. When >0, the emergency light turns OFF after it has been ON
 // continuously for this many minutes, and re-arms the next time a room turns
-// on (which ends the all-off standby period). emergencyOnSince is the WALL-CLOCK
-// (time_t) timestamp when the current continuous-ON period began (0 = not
-// currently on); emergencyLatchedOff is set once the timeout fires so we hold it
-// off without re-toggling every tick, and cleared when standby ends.
-//
-// emergencyTimeoutMin: -1 = UNKNOWN (not yet read from Firebase / last read
-// failed), 0 = explicitly DISABLED, >0 = minutes. The -1 vs 0 distinction is a
-// safety fix: a config read that returns "error" because the network wasn't up
-// yet after a power-blip reboot must NOT be treated as "disabled" (which left
-// the emergency light permanently on with no auto-off). While UNKNOWN we fall
-// back to the last value persisted in LittleFS, and keep retrying the read.
-int  emergencyTimeoutMin  = -1;     // -1 = unknown, 0 = disabled, >0 = minutes
-// WALL-CLOCK epoch seconds (time(nullptr)) when the current continuous-ON period
-// began — NOT millis(). millis() resets to 0 on every reboot, so a power blip
-// mid-standby used to restart the 20-min countdown from zero; with repeated
-// blips it never reached the timeout and the light stayed on forever. Wall-clock
-// survives reboots once NTP is synced, so the timeout fires on real elapsed time.
-time_t emergencyOnSince = 0;        // epoch seconds when the light last turned ON
+// on (which ends the all-off standby period). emergencyOnSince is the millis()
+// timestamp when the current continuous-ON period began (0 = not currently on);
+// emergencyLatchedOff is set once the timeout fires so we hold it off without
+// re-toggling every tick, and cleared when standby ends (a room comes on).
+int  emergencyTimeoutMin  = 0;      // 0 = disabled
+unsigned long emergencyOnSince = 0; // millis() when the light last turned ON
 // Last level actually written to emergencyPin. -1 = never written yet, so
 // the first real update always goes through. updateEmergencyLight() re-runs
 // its validation (all-rooms-off check, timeout comparison) far more often
@@ -1308,33 +1286,19 @@ void applyEmergencyPinConfig() {
   }
 }
 
-// ── Emergency light auto-off timeout ─────────────────────────────────
-// SAFETY-CRITICAL distinction: a read that returns "error" (network not up yet,
-// e.g. right after a power-blip reboot before WiFi/router recovers) must NOT be
-// treated as "disabled". Doing so used to leave the emergency light permanently
-// ON with no auto-off until the next clean-network reboot. Now:
-//   "error"        -> leave emergencyTimeoutMin UNCHANGED (keep last known /
-//                     LittleFS fallback) and return failure so the caller retries.
-//   ""/"null"/<=0  -> genuinely disabled (0).
-//   >0             -> enable, and PERSIST so a future no-network boot can fall
-//                     back to this value instead of starting from "unknown".
-// Returns true if a definitive value (disabled or a number) was read.
-bool applyEmergencyTimeoutConfig() {
+// ── Emergency light auto-off timeout — read once at boot ──────────────
+// Same bare-scalar /config read. Missing/null/error/<=0 → 0 (disabled), so the
+// emergency light stays always-on for setups that haven't opted in.
+void applyEmergencyTimeoutConfig() {
   String val = fbGet("/config/emergencyTimeout");
-  if (val == "error") {
-    Serial.println("Emergency light auto-off: config read failed (network?) — keeping last value, will retry");
-    return false;   // UNKNOWN stays as-is; loop retry + LittleFS fallback cover it
-  }
   int m = val.toInt();
-  if (val == "" || val == "null" || m <= 0) {
+  if (val == "" || val == "null" || val == "error" || m <= 0) {
     emergencyTimeoutMin = 0;
     Serial.println("Emergency light auto-off: disabled");
   } else {
     emergencyTimeoutMin = m;
-    saveConfig();   // persist so a later no-network boot falls back to this
     Serial.printf("Emergency light auto-off: %d min\n", emergencyTimeoutMin);
   }
-  return true;
 }
 
 // ── Shared end-of-slot warning beeper pin — read once at boot ─────────
@@ -1426,42 +1390,24 @@ void updateEmergencyLight() {
   }
 
   // All rooms are off → the emergency light wants to be ON.
-  // emergencyTimeoutMin <= 0 covers BOTH explicitly-disabled (0) and still-
-  // unknown (-1, never read and no persisted fallback). For an EMERGENCY light,
-  // always-on during standby is the correct fail-safe for both — better lit than
-  // dark during an outage. Once a real timeout value is known, the branch below
-  // runs. (The -1 case is now rare: loadConfig restores the last persisted value
-  // and the loop keeps retrying the Firebase read until it succeeds.)
   if (emergencyTimeoutMin <= 0) {
+    // No timeout configured — original always-on-while-standby behaviour.
     setEmergencyLightState(true);
     return;
   }
 
-  // The standby timer uses WALL-CLOCK time (epoch seconds), not millis(), so a
-  // reboot mid-standby (e.g. a power blip) does NOT restart the countdown — the
-  // 20-min timeout fires on real elapsed time. A meaningful epoch needs NTP; if
-  // the clock isn't synced yet we can't measure elapsed time, so hold the light
-  // ON (fail-safe) and wait — the timer will start/continue once time is valid.
-  if (!timeSynced) {
-    setEmergencyLightState(true);
-    return;
-  }
-  time_t nowEpoch = time(nullptr);
-
-  // Start the standby timer on the rising edge (entering the all-off period).
+  // Timeout is configured. Start the standby timer on the rising edge (the
+  // moment we enter the all-off period).
   if (emergencyOnSince == 0 && !emergencyLatchedOff) {
-    emergencyOnSince = nowEpoch;
+    emergencyOnSince = millis();
   }
   // If we've already timed out this standby period, keep it off.
   if (emergencyLatchedOff) {
     setEmergencyLightState(false);
     return;
   }
-  // Guard against a clock that jumped BACKWARDS (NTP correction) leaving
-  // emergencyOnSince in the future: clamp so elapsed can't go negative/huge.
-  if (emergencyOnSince > nowEpoch) emergencyOnSince = nowEpoch;
   // Still within the allowed window → on; past it → latch off.
-  if (nowEpoch - emergencyOnSince >= (time_t)emergencyTimeoutMin * 60) {
+  if (millis() - emergencyOnSince >= (unsigned long)emergencyTimeoutMin * 60000UL) {
     emergencyLatchedOff = true;
     setEmergencyLightState(false);
     Serial.printf("[%s] Emergency light auto-off after %d min standby\n", getTime().c_str(), emergencyTimeoutMin);
@@ -2527,13 +2473,6 @@ bool loadConfig() {
   syncGeneration = syncRawField(json, "syncGeneration").toInt();
   syncRevision = syncRawField(json, "syncRevision").toInt();
   configVersion = syncRawField(json, "configVersion").toInt();
-  // Last known emergency auto-off timeout — the fallback used when a post-blip
-  // boot can't reach Firebase to read /config/emergencyTimeout. Absent in older
-  // config files (parseIntField → sentinel): keep UNKNOWN (-1) so we retry and
-  // never silently disable the timeout. A persisted >=0 value is adopted as the
-  // working value until a fresh Firebase read confirms or changes it.
-  { String etRaw = syncRawField(json, "emergencyTimeoutMin");
-    if (etRaw.length() > 0) { int et = etRaw.toInt(); if (et >= 0) emergencyTimeoutMin = et; } }
   return firebaseUrl.length() > 0;
 }
 
@@ -2544,8 +2483,7 @@ void saveConfig() {
     "\",\"lastRolloverDay\":" + String(lastRolloverDay) +
     ",\"syncGeneration\":" + String(syncGeneration) +
     ",\"syncRevision\":" + String(syncRevision) +
-    ",\"configVersion\":" + String(configVersion) +
-    ",\"emergencyTimeoutMin\":" + String(emergencyTimeoutMin) + "}";
+    ",\"configVersion\":" + String(configVersion) + "}";
   f.print(json);
   f.close();
   Serial.println("Config saved to LittleFS");
@@ -2818,11 +2756,6 @@ void loop() {
     if (WiFi.status() == WL_CONNECTED) {
       syncConfigV2();
       syncSlotsV2();
-      // If the emergency auto-off timeout is still UNKNOWN (-1) — the boot read
-      // failed because the network wasn't up yet (classic post-power-blip) and
-      // no LittleFS fallback existed — keep retrying until we get a real value,
-      // so the timeout can never stay silently disabled for the whole session.
-      if (emergencyTimeoutMin < 0) applyEmergencyTimeoutConfig();
     }
   }
 
