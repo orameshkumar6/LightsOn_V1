@@ -6,6 +6,17 @@
  *             LittleFS (bundled with modern ESP32 board packages),
  *             WiFi, HTTPClient, WiFiClientSecure (all built-in)
  *
+ *  v6.10 — Rollover self-heal (marker-vs-data desync recovery):
+ *  - If the rollover marker says "done today" but a room's today bucket still
+ *    holds a one-time slot stamped with a PAST date (the admin PWA or a partial
+ *    run advanced the marker without this board rebuilding the slots), the
+ *    firmware now detects it and forces a real midnightRollover() to drop the
+ *    stale slots. Detection is ZERO extra Firebase reads — it compares today's
+ *    date against a per-room date stamped for free by parseSlots() from slots
+ *    already read on the normal sync cycle. Throttled to <=1 forced heal / 5 min.
+ *  - (The v6.9 emergency-light timeout change was reverted; emergency logic is
+ *    unchanged from v6.8.)
+ *
  *  v6.8 — HTTPS connection reuse (persistent TLS client):
  *  - fbGet/fbPut/fbPatch share one long-lived WiFiClientSecure + HTTPClient
  *    with setReuse(true), so the TLS handshake (and its ~3-5 KB cert-chain
@@ -71,6 +82,7 @@
 void applyRelayWiringConfig();
 void applyEmergencyPinConfig();
 void applyEmergencyTimeoutConfig();
+void selfHealRollover();
 void applyBeeperPinConfig();
 void applyWarnMinutesConfig();
 void applyBeepConfig();
@@ -300,6 +312,23 @@ bool          timeSynced        = false; // set once in setup() from getLocalTim
 // silently skipped. -1 = no rollover recorded yet (first boot on this
 // firmware, or ever) — see loadConfig()/saveConfig().
 int lastRolloverDay = -1;
+
+// ── Rollover self-heal ────────────────────────────────────────
+// Ground-truth date of what is ACTUALLY in each room's today (/slots) bucket,
+// captured for free while parseSlots() parses the slots the firmware already
+// reads on its normal sync cycle (NO extra Firebase reads). It holds the "date"
+// field of the one-time slots in today's bucket; "" = unknown or only recurring
+// slots (which carry today's date when freshly materialized).
+//
+// Why: lastRolloverDay/the Firebase marker can say "rolled over today" while the
+// slot DATA was never actually transformed (a marker-desync — the admin PWA or a
+// partial run advanced the marker, this board adopted it without rebuilding).
+// Comparing this stamped date against today detects that desync from RAM alone,
+// so a device that is alive + time-synced self-heals by forcing a real rollover
+// instead of showing yesterday's stale slots all day.
+char roomSlotsDate[MAX_ROOMS][11] = {{0}};   // "YYYY-MM-DD" per room, or ""
+unsigned long lastSelfHealAttempt = 0;       // throttle: millis() of last forced heal
+const unsigned long SELF_HEAL_MIN_INTERVAL = 300000UL; // >= 5 min between forced heals
 
 // ── Firebase Sync V2 cursor (persisted in CONFIG_PATH) ─────────
 long syncGeneration = 0;     // YYYYMMDD daily generation
@@ -720,6 +749,7 @@ void parseSlots(int idx, String json) {
   Slot tempSlots[MAX_SLOTS_PER_ROOM];
   int  tempCount = 0;
   int  pos = 0;
+  String oneTimeDate = "";    // self-heal: date of a one-time slot in this bucket
   bool sawSlotObject = false; // true if we parsed ANY real slot object, deleted
                               // or not — distinguishes "every slot got soft-
                               // deleted, count really is 0" from "couldn't
@@ -755,6 +785,13 @@ void parseSlots(int idx, String json) {
         isDeleted = slotObj.indexOf("\"deleted\":true") >= 0;
         // Recurring flag
         isRecurring = slotObj.indexOf("\"recurring\":true") >= 0;
+        // Self-heal: remember the date of a live one-time slot (zero extra read —
+        // slotObj is already in hand). A one-time slot carrying a PAST date while
+        // the rollover marker says "today" is the desync signal we heal on.
+        if (!isDeleted && !isRecurring && oneTimeDate.length() == 0) {
+          String d = extractStringField(slotObj, "date");
+          if (d.length() > 0) oneTimeDate = d;
+        }
         // Activated: activatedAt exists and is NOT null. This is now the SINGLE
         // source of truth for whether a slot drives the relay — for BOTH coded
         // and code-less ("Auto") slots.
@@ -810,6 +847,14 @@ void parseSlots(int idx, String json) {
     rooms[idx].slotCount = tempCount;
     for (int i = 0; i < tempCount; i++) rooms[idx].slots[i] = tempSlots[i];
     mergeSlots(idx);
+    // Self-heal stamp: a one-time slot's own date is the ground truth for "what
+    // day is this bucket". With no one-time slots (only recurring, or empty),
+    // there is nothing that can be STALE — recurring are regenerated with today's
+    // date — so record today's date, which never trips the heal.
+    if (idx >= 0 && idx < MAX_ROOMS) {
+      String stamp = (oneTimeDate.length() > 0) ? oneTimeDate : getDateStr();
+      stamp.toCharArray(roomSlotsDate[idx], sizeof(roomSlotsDate[idx]));
+    }
   }
 }
 
@@ -2174,6 +2219,51 @@ void checkMidnight() {
   }
 }
 
+// ── Rollover self-heal ────────────────────────────────────────
+// Handles the DESYNC case checkMidnight() can't: the rollover marker says
+// "done today" (lastRolloverDay == today) yet a room's today bucket still holds
+// a one-time slot stamped with a PAST date — i.e. the slots were never actually
+// transformed (admin PWA / partial run advanced the marker without rebuilding,
+// so this board adopted "done" via syncRolloverMarkerFromFirebase and never
+// rebuilt). Left alone this shows yesterday's stale slots all day and, since
+// they're expired/unactivated, no room turns on.
+//
+// Detection is ZERO extra Firebase reads: it compares today's date against
+// roomSlotsDate[], which parseSlots() already stamped from slots the firmware
+// reads on its normal sync cycle. A heal forces one real midnightRollover(),
+// throttled to at most once per SELF_HEAL_MIN_INTERVAL so a persistently-failing
+// heal can't storm. Guarded so it ONLY runs in the genuine desync state:
+//   - time is synced (otherwise "today" is meaningless),
+//   - the marker already claims today (the pure "marker behind" case is
+//     checkMidnight()'s job, not this),
+//   - at least one room's today bucket carries a strictly-past date.
+void selfHealRollover() {
+  if (!timeSynced) return;
+  int todayEpochDay = currentEpochDay();
+  if (lastRolloverDay != todayEpochDay) return;   // not a desync — checkMidnight handles "behind"
+  if (millis() - lastSelfHealAttempt < SELF_HEAL_MIN_INTERVAL && lastSelfHealAttempt != 0) return;
+
+  String todayStr = getDateStr();
+  bool stale = false;
+  for (int i = 0; i < roomCount && i < MAX_ROOMS; i++) {
+    const char *d = roomSlotsDate[i];
+    // A real, strictly-past date is the only trigger. "" (unknown / recurring-
+    // only / empty bucket) and today's date never heal — avoids false positives.
+    if (d[0] != '\0' && strcmp(d, todayStr.c_str()) < 0) { stale = true; break; }
+  }
+  if (!stale) return;
+
+  lastSelfHealAttempt = millis();
+  Serial.printf("[%s] Rollover self-heal: today bucket holds a stale-dated slot but marker=today — forcing rollover\n",
+    getTime().c_str());
+  // Force the real transform. midnightRollover() rebuilds today from recurring
+  // defs + keeps only today-dated one-time slots (so the stale ones are dropped)
+  // + promotes tomorrow (a no-op if already promoted), then re-reads rooms and
+  // re-drives relays. On success it advances the marker and re-stamps
+  // roomSlotsDate[] via the readAllRooms() it calls, clearing the stale state.
+  midnightRollover();
+}
+
 // ── Mark slot as expired in Firebase ─────────────────────────
 // Writes ONLY the single field /rooms/roomN/slots/{firebaseKey}/expired = true —
 // a targeted per-field write, NOT a full-array rewrite. {firebaseKey} is
@@ -2743,6 +2833,7 @@ void loop() {
     checkSchedules();
     checkEndOfSlotWarnings(); // update per-room warning flags, fire beeper burst on entry
     checkMidnight();  // detect date change → rollover slots
+    selfHealRollover(); // detect a marker-vs-data desync and force a rollover
   }
 
   // Non-blocking end-of-slot warning outputs — run every iteration so the
