@@ -6,6 +6,15 @@
  *             LittleFS (bundled with modern ESP32 board packages),
  *             WiFi, HTTPClient, WiFiClientSecure (all built-in)
  *
+ *  v6.11 — Rollover self-heal: cap to ONE attempt per calendar day.
+ *  - The v6.10 self-heal re-fired midnightRollover() every SELF_HEAL_MIN_INTERVAL
+ *    while a stale-date condition persisted. Each forced rollover runs
+ *    applyAllStates() -> updateEmergencyLight(), which re-pulsed the emergency
+ *    light overnight (ON for the timeout, OFF, ON again on the next heal) when
+ *    no slots were active. Now it attempts at most once per day (lastSelfHealDay);
+ *    the normal midnight rollover handles the day boundary. Emergency logic
+ *    itself is unchanged.
+ *
  *  v6.10 — Rollover self-heal (marker-vs-data desync recovery):
  *  - If the rollover marker says "done today" but a room's today bucket still
  *    holds a one-time slot stamped with a PAST date (the admin PWA or a partial
@@ -329,6 +338,15 @@ int lastRolloverDay = -1;
 char roomSlotsDate[MAX_ROOMS][11] = {{0}};   // "YYYY-MM-DD" per room, or ""
 unsigned long lastSelfHealAttempt = 0;       // throttle: millis() of last forced heal
 const unsigned long SELF_HEAL_MIN_INTERVAL = 300000UL; // >= 5 min between forced heals
+// Epoch-day of the last self-heal ATTEMPT. The self-heal forces at most ONE
+// midnightRollover per calendar day: if that single attempt doesn't clear the
+// stale-date condition, it must NOT keep re-firing every SELF_HEAL_MIN_INTERVAL
+// for the rest of the day. Repeated forced rollovers each run applyAllStates()
+// -> updateEmergencyLight(), which was re-pulsing the emergency light overnight
+// (ON for the 5-min timeout, OFF, then ON again on the next heal). One attempt
+// per day is enough to recover a genuine desync; the real midnight rollover
+// (checkMidnight) handles the normal day boundary and resets this.
+int lastSelfHealDay = -1;
 
 // ── Firebase Sync V2 cursor (persisted in CONFIG_PATH) ─────────
 long syncGeneration = 0;     // YYYYMMDD daily generation
@@ -2241,6 +2259,14 @@ void selfHealRollover() {
   if (!timeSynced) return;
   int todayEpochDay = currentEpochDay();
   if (lastRolloverDay != todayEpochDay) return;   // not a desync — checkMidnight handles "behind"
+  // ONE self-heal attempt per calendar day. Without this, a stale-date
+  // condition that a forced rollover can't clear made the self-heal re-fire
+  // every SELF_HEAL_MIN_INTERVAL all day/night; each forced midnightRollover()
+  // runs applyAllStates() -> updateEmergencyLight(), which re-pulsed the
+  // emergency light (ON for the timeout, OFF, ON again next heal) overnight
+  // when no slots were active. One attempt is enough to recover a genuine
+  // desync; the normal midnight rollover resets lastSelfHealDay for the new day.
+  if (lastSelfHealDay == todayEpochDay) return;
   if (millis() - lastSelfHealAttempt < SELF_HEAL_MIN_INTERVAL && lastSelfHealAttempt != 0) return;
 
   String todayStr = getDateStr();
@@ -2253,6 +2279,7 @@ void selfHealRollover() {
   }
   if (!stale) return;
 
+  lastSelfHealDay = todayEpochDay;   // mark attempted today — don't loop if it can't clear
   lastSelfHealAttempt = millis();
   Serial.printf("[%s] Rollover self-heal: today bucket holds a stale-dated slot but marker=today — forcing rollover\n",
     getTime().c_str());
